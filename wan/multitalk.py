@@ -2,6 +2,7 @@
 import gc
 from inspect import ArgSpec
 import logging
+import json
 import math
 import importlib
 import os
@@ -26,16 +27,27 @@ from .modules.clip import CLIPModel
 from .modules.multitalk_model import WanModel, WanLayerNorm, WanRMSNorm
 from .modules.t5 import T5EncoderModel, T5LayerNorm, T5RelativeEmbedding
 from .modules.vae import WanVAE, CausalConv3d, RMS_norm, Upsample
-from .utils.multitalk_utils import MomentumBuffer, adaptive_projected_guidance
-from src.vram_management import AutoWrappedLinear, AutoWrappedModule, enable_vram_management
+from .utils.multitalk_utils import MomentumBuffer, adaptive_projected_guidance, match_and_blend_colors
+from src.vram_management import AutoWrappedQLinear, AutoWrappedLinear, AutoWrappedModule, enable_vram_management
 from wan.utils.utils import load_torch_file, standardize_lora_key_format, load_lora_for_models, apply_lora
 from wan.wan_lora import WanLoraWrapper
+
+from safetensors.torch import load_file
+from optimum.quanto import quantize, freeze, qint8,requantize
+import optimum.quanto.nn.qlinear as qlinear
 
 def torch_gc():
     torch.cuda.empty_cache()
     torch.cuda.ipc_collect()
 
-
+def to_param_dtype_fp32only(model, param_dtype):
+    for module in model.modules():
+        for name, param in module.named_parameters(recurse=False):
+            if param.dtype == torch.float32:
+                param.data = param.data.to(param_dtype)
+        for name, buf in module.named_buffers(recurse=False):
+            if buf.dtype == torch.float32:
+                module._buffers[name] = buf.to(param_dtype)
 def resize_and_centercrop(cond_image, target_size):
         """
         Resize image or tensor to the target size without padding.
@@ -96,6 +108,7 @@ class MultiTalkPipeline:
         self,
         config,
         checkpoint_dir,
+        quant_dir=None,
         device_id=0,
         rank=0,
         t5_fsdp=False,
@@ -106,7 +119,8 @@ class MultiTalkPipeline:
         num_timesteps=1000,
         use_timestep_transform=True,
         lora_dir=None,
-        lora_scales=None
+        lora_scales=None,
+        quant = None
     ):
         r"""
         Initializes the image-to-video generation model components.
@@ -130,7 +144,11 @@ class MultiTalkPipeline:
                 Whether to place T5 model on CPU. Only works without t5_fsdp.
             init_on_cpu (`bool`, *optional*, defaults to True):
                 Enable initializing Transformer Model on CPU. Only works without FSDP or USP.
+            quant (`str`, *optional*, defaults to None):
+                Quantization type, must be 'int8' or 'fp8'.
         """
+        if quant is not None and quant not in ("int8", "fp8"):
+            raise ValueError("quant must be 'int8', 'fp8', or None(default fp32 model)")
         self.device = torch.device(f"cuda:{device_id}")
         self.config = config
         self.rank = rank
@@ -148,6 +166,8 @@ class MultiTalkPipeline:
             checkpoint_path=os.path.join(checkpoint_dir, config.t5_checkpoint),
             tokenizer_path=os.path.join(checkpoint_dir, config.t5_tokenizer),
             shard_fn=shard_fn if t5_fsdp else None,
+            quant=quant,
+            quant_dir=quant_dir,
         )
 
         self.vae_stride = config.vae_stride
@@ -164,15 +184,34 @@ class MultiTalkPipeline:
             tokenizer_path=os.path.join(checkpoint_dir, config.clip_tokenizer))
 
         logging.info(f"Creating WanModel from {checkpoint_dir}")
-        self.model = WanModel.from_pretrained(checkpoint_dir)
+        if quant is not None:
+            logging.info(f"Loading Quantized MultiTalk from {os.path.join(quant_dir,'quant_models')}")
+            with torch.device('meta'):
+                wan_config = json.load(open(os.path.join(checkpoint_dir, "config.json")))
+                self.model = WanModel(weight_init=False,**wan_config)
+                torch_gc()
+            # load quantized model
+            if lora_dir is not None:
+                logging.info(f"Loading Quantized LoRA from {lora_dir[0]}")
+                model_state_dict = load_file(lora_dir[0])
+                map_json_path = os.path.join(os.path.dirname(lora_dir[0]),f"quantization_map_{quant}_FusionX.json")
+            else:
+                model_state_dict = load_file(os.path.join(quant_dir,"quant_models", f"dit_model_{quant}.safetensors"))
+                map_json_path = os.path.join(quant_dir,"quant_models", f"dit_model_map_{quant}.json")
+            self.model.init_freqs()
+            with open(map_json_path, "r") as f:
+                quantization_map = json.load(f)
+            requantize(self.model, model_state_dict, quantization_map, device='cpu')
+        else:
+            self.model = WanModel.from_pretrained(checkpoint_dir)
         self.model.eval().requires_grad_(False)
         
-        
-        if lora_dir is not None:
+        to_param_dtype_fp32only(self.model, self.param_dtype)
+        if lora_dir is not None and quant is None :
             lora_wrapper = WanLoraWrapper(self.model)
             for lora_path, lora_scale in zip(lora_dir, lora_scales):
                 lora_name = lora_wrapper.load_lora(lora_path)
-                lora_wrapper.apply_lora(lora_name, lora_scale)
+                lora_wrapper.apply_lora(lora_name, lora_scale, param_dtype=self.param_dtype, device=self.device)
 
 
     
@@ -197,7 +236,7 @@ class MultiTalkPipeline:
         else:
             self.sp_size = 1
 
-        self.model.to(self.param_dtype)
+        
 
         if dist.is_initialized():
             dist.barrier()
@@ -234,6 +273,7 @@ class MultiTalkPipeline:
         enable_vram_management(
             self.model,
             module_map={
+                qlinear.QLinear: AutoWrappedQLinear,
                 torch.nn.Linear: AutoWrappedLinear,
                 torch.nn.Conv3d: AutoWrappedModule,
                 torch.nn.LayerNorm: AutoWrappedModule,
@@ -318,6 +358,7 @@ class MultiTalkPipeline:
                  max_frames_num=1000,
                  face_scale=0.05,
                  progress=True,
+                 color_correction_strength=0.0,
                  extra_args=None):
         r"""
         Generates video frames from input image and text prompt using diffusion process.
@@ -369,6 +410,11 @@ class MultiTalkPipeline:
         cond_image = cond_image / 255
         cond_image = (cond_image - 0.5) * 2 # normalization
         cond_image = cond_image.to(self.device)  # 1 C 1 H W
+
+        # Store the original image for color reference if strength > 0
+        original_color_reference = None
+        if color_correction_strength > 0.0:
+            original_color_reference = cond_image.clone()
 
 
         # read audio embeddings
@@ -575,6 +621,15 @@ class MultiTalkPipeline:
                     'ref_target_masks': ref_target_masks
                 }
 
+                arg_null_audio = {
+                    'context': [context],
+                    'clip_fea': clip_context,
+                    'seq_len': max_seq_len,
+                    'y': y,
+                    'audio': torch.zeros_like(audio_embs)[-1:],
+                    'ref_target_masks': ref_target_masks
+                }
+
 
                 arg_null = {
                     'context': [context_null],
@@ -615,30 +670,46 @@ class MultiTalkPipeline:
                     noise_pred_cond = self.model(
                     latent_model_input, t=timestep, **arg_c)[0] 
                     torch_gc()
-                    noise_pred_drop_text = self.model(
-                        latent_model_input, t=timestep, **arg_null_text)[0] 
-                    torch_gc()
-                    noise_pred_uncond = self.model(
-                        latent_model_input, t=timestep, **arg_null)[0]  
-                    torch_gc()
+
+                    if math.isclose(text_guide_scale, 1.0):
+                        noise_pred_drop_audio = self.model(
+                            latent_model_input, t=timestep, **arg_null_audio)[0]  
+                        torch_gc()
+                    else:
+                        noise_pred_drop_text = self.model(
+                            latent_model_input, t=timestep, **arg_null_text)[0] 
+                        torch_gc()
+                        noise_pred_uncond = self.model(
+                            latent_model_input, t=timestep, **arg_null)[0]  
+                        torch_gc()
 
                     if extra_args.use_apg:
                         # correct update direction
-                        diff_uncond_text  = noise_pred_cond - noise_pred_drop_text
-                        diff_uncond_audio = noise_pred_drop_text - noise_pred_uncond
-                        noise_pred = noise_pred_cond + (text_guide_scale - 1) * adaptive_projected_guidance(diff_uncond_text, 
-                                                                                                            noise_pred_cond, 
-                                                                                                            momentum_buffer=text_momentumbuffer, 
-                                                                                                            norm_threshold=extra_args.apg_norm_threshold) \
-                               + (audio_guide_scale - 1) * adaptive_projected_guidance(diff_uncond_audio, 
-                                                                                        noise_pred_cond, 
-                                                                                        momentum_buffer=audio_momentumbuffer, 
-                                                                                        norm_threshold=extra_args.apg_norm_threshold)
+                        if math.isclose(text_guide_scale, 1.0):
+                            diff_uncond_audio  = noise_pred_cond - noise_pred_drop_audio
+                            noise_pred = noise_pred_cond + (audio_guide_scale - 1)* adaptive_projected_guidance(diff_uncond_audio, 
+                                                                                            noise_pred_cond, 
+                                                                                            momentum_buffer=audio_momentumbuffer, 
+                                                                                            norm_threshold=extra_args.apg_norm_threshold)
+                        else:
+                            diff_uncond_text  = noise_pred_cond - noise_pred_drop_text
+                            diff_uncond_audio = noise_pred_drop_text - noise_pred_uncond
+                            noise_pred = noise_pred_cond + (text_guide_scale - 1) * adaptive_projected_guidance(diff_uncond_text, 
+                                                                                                                noise_pred_cond, 
+                                                                                                                momentum_buffer=text_momentumbuffer, 
+                                                                                                                norm_threshold=extra_args.apg_norm_threshold) \
+                                + (audio_guide_scale - 1) * adaptive_projected_guidance(diff_uncond_audio, 
+                                                                                            noise_pred_cond, 
+                                                                                            momentum_buffer=audio_momentumbuffer, 
+                                                                                            norm_threshold=extra_args.apg_norm_threshold)
                     else:
                         # vanilla CFG strategy
-                        noise_pred = noise_pred_uncond + text_guide_scale * (
-                            noise_pred_cond - noise_pred_drop_text) + \
-                            audio_guide_scale * (noise_pred_drop_text - noise_pred_uncond)  
+                        if math.isclose(text_guide_scale, 1.0):
+                            noise_pred = noise_pred_drop_audio + audio_guide_scale* (noise_pred_cond - noise_pred_drop_audio)  
+                        else:
+                            noise_pred = noise_pred_uncond + text_guide_scale * (
+                                noise_pred_cond - noise_pred_drop_text) + \
+                                audio_guide_scale * (noise_pred_drop_text - noise_pred_uncond)  
                     noise_pred = -noise_pred  
 
                     # update latent
@@ -666,6 +737,11 @@ class MultiTalkPipeline:
             
             # cache generated samples
             videos = torch.stack(videos).cpu() # B C T H W
+            # >>> START OF COLOR CORRECTION STEP <<<
+            if color_correction_strength > 0.0 and original_color_reference is not None:
+                videos = match_and_blend_colors(videos, original_color_reference, color_correction_strength)
+            # >>> END OF COLOR CORRECTION STEP <<<
+
             if is_first_clip:
                 gen_video_list.append(videos)
             else:

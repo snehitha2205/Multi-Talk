@@ -80,6 +80,7 @@ We propose **MultiTalk** , a novel framework for audio-driven multi-person conve
 
 ## 🔥 Latest News
 
+* July 11, 2025: 🔥🔥 `MultiTalk` supports INT8 quantization and CFG strategy updation(with lora).
 * July 01, 2025: 🔥🔥 `MultiTalk` supports input audios with TTS, [FusioniX](https://huggingface.co/vrgamedevgirl84/Wan14BT2VFusioniX/blob/main/FusionX_LoRa/Wan2.1_I2V_14B_FusionX_LoRA.safetensors) and [lightx2v](https://huggingface.co/Kijai/WanVideo_comfy/blob/main/Wan21_T2V_14B_lightx2v_cfg_step_distill_lora_rank32.safetensors) LoRA acceleration (requires only 4~8 steps), and Gradio.
 * June 14, 2025: 🔥🔥 We release `MultiTalk` with support for `multi-GPU inference`, `teacache acceleration`, `APG` and `low-VRAM inference` (enabling 480P video generation on a single RTX 4090). [APG](https://arxiv.org/abs/2410.02416) is used to alleviate the color error accumulation in long video generation. TeaCache is capable of increasing speed by approximately 2~3x.
 * June 9, 2025: 🔥🔥 We release the [weights](https://huggingface.co/MeiGen-AI/MeiGen-MultiTalk) and inference code of **MultiTalk** 
@@ -101,7 +102,7 @@ We propose **MultiTalk** , a novel framework for audio-driven multi-person conve
 - [x] Multi-GPU Inference
 - [ ] Inference acceleration
   - [x] TeaCache
-  - [ ] int8 quantization
+  - [x] int8 quantization
   - [ ] LCM distillation
   - [ ] Sparse Attention
 - [x] Run with very low VRAM
@@ -338,7 +339,7 @@ python generate_multitalk.py \
     --lora_dir weights/Wan2.1_I2V_14B_FusionX_LoRA.safetensors \
     --lora_scale 1.0 \
     --sample_text_guide_scale 1.0 \
-    --sample_audio_guide_scale 1.0 \
+    --sample_audio_guide_scale 2.0 \
     --sample_steps 8 \
     --mode streaming \
     --num_persistent_param_in_dit 0 \
@@ -356,15 +357,50 @@ python generate_multitalk.py \
     --lora_dir weights/Wan2.1_I2V_14B_FusionX_LoRA.safetensors \
     --lora_scale 1.0 \
     --sample_text_guide_scale 1.0 \
-    --sample_audio_guide_scale 1.0 \
+    --sample_audio_guide_scale 2.0 \
     --sample_steps 8 \
     --mode streaming \
     --num_persistent_param_in_dit 0 \
     --save_file multi_long_lowvram_fusionx_exp \
+
+```
+
+#### 4. Run with the quantization model (Only support run with single gpu)
+
+```
+python generate_multitalk.py \
+    --ckpt_dir weights/Wan2.1-I2V-14B-480P \
+    --wav2vec_dir 'weights/chinese-wav2vec2-base' \
+    --input_json examples/multitalk_example_2.json \
+    --sample_steps 40 \
+    --mode streaming \
+    --use_teacache \
+    --quant int8 \
+    --quant_dir weights/MeiGen-MultiTalk \
+    --num_persistent_param_in_dit 0 \
+    --save_file multi_long_lowvram_exp_quant
+```
+
+Run with lora:
+
+```
+python generate_multitalk.py \
+    --ckpt_dir weights/Wan2.1-I2V-14B-480P \
+    --wav2vec_dir 'weights/chinese-wav2vec2-base' \
+    --input_json examples/multitalk_example_1.json \
+    --quant int8 \
+    --quant_dir weights/MeiGen-MultiTalk \
+    --lora_dir weights/MeiGen-MultiTalk/quant_models/quant_model_int8_FusionX.safetensors \
+    --sample_text_guide_scale 1.0 \
+    --sample_audio_guide_scale 2.0 \
+    --sample_steps 8 \
+    --mode streaming \
+    --num_persistent_param_in_dit 0 \
+    --save_file multi_long_lowvram_fusionx_exp_quant \
     --sample_shift 2
 ```
 
-#### 4. Run with Gradio
+#### 5. Run with Gradio
 
 
 
@@ -382,6 +418,16 @@ or
 python app.py --num_persistent_param_in_dit 0 
 ```
 
+or 
+
+```
+python app.py \
+    --quant int8 \
+    --quant_dir weights/MeiGen-MultiTalk \
+    --lora_dir weights/MeiGen-MultiTalk/quant_models/quant_model_int8_FusionX.safetensors \
+    --sample_shift 2 \
+    --num_persistent_param_in_dit 0
+```
 
 ## 🚀Computational Efficiency
 The results are evaluated on A100 GPUs for multi-person generation. Single-person generation uses less memory and provides faster inference.

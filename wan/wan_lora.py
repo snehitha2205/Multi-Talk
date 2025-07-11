@@ -4,6 +4,7 @@ from safetensors import safe_open
 from loguru import logger
 import gc
 from functools import lru_cache
+from tqdm import tqdm
 
 @lru_cache(maxsize=None)
 def GET_DTYPE():
@@ -14,7 +15,7 @@ class WanLoraWrapper:
     def __init__(self, wan_model):
         self.model = wan_model
         self.lora_metadata = {}
-        self.override_dict = {}  # On CPU
+        # self.override_dict = {}  # On CPU
 
     def load_lora(self, lora_path, lora_name=None):
         if lora_name is None:
@@ -29,36 +30,37 @@ class WanLoraWrapper:
 
         return lora_name
 
-    def _load_lora_file(self, file_path):
+    def _load_lora_file(self, file_path, param_dtype):
         with safe_open(file_path, framework="pt") as f:
-            tensor_dict = {key: f.get_tensor(key).to(torch.bfloat16) for key in f.keys()}
+            tensor_dict = {key: f.get_tensor(key).to(param_dtype) for key in f.keys()}
         return tensor_dict
 
-    def apply_lora(self, lora_name, alpha=1.0):
+    def apply_lora(self, lora_name, alpha=1.0, param_dtype=torch.bfloat16, device='cpu'):
         if lora_name not in self.lora_metadata:
             logger.info(f"LoRA {lora_name} not found. Please load it first.")
 
-        # if hasattr(self.model, "current_lora") and self.model.current_lora:
-        #     self.remove_lora()
-        # import ipdb
-        # ipdb.set_trace()
-        # if not hasattr(self.model, "original_weight_dict"):
-        self.model.original_weight_dict = {}
-        for k, v in self.model.named_parameters():
-            self.model.original_weight_dict[k] = v
 
 
-        lora_weights = self._load_lora_file(self.lora_metadata[lora_name]["path"])
-        weight_dict = self.model.original_weight_dict
-        self._apply_lora_weights(weight_dict, lora_weights, alpha)
+        lora_weights = self._load_lora_file(self.lora_metadata[lora_name]["path"], param_dtype)
+        # weight_dict = self.model.original_weight_dict
+        self._apply_lora_weights(lora_weights, alpha, device)
         # self.model._init_weights(weight_dict)
 
         logger.info(f"Applied LoRA: {lora_name} with alpha={alpha}")
         return True
 
+    def get_parameter_by_name(self, model, param_name):
+        parts = param_name.split('.')
+        current = model
+        for part in parts:
+            if part.isdigit():
+                current = current[int(part)]
+            else:
+                current = getattr(current, part)
+        return current
 
     @torch.no_grad()
-    def _apply_lora_weights(self, weight_dict, lora_weights, alpha):
+    def _apply_lora_weights(self, lora_weights, alpha, device):
         lora_pairs = {}
         prefix = "diffusion_model."
 
@@ -76,22 +78,25 @@ class WanLoraWrapper:
                 lora_pairs[base_name] = (key)
 
         applied_count = 0
-        for name, param in weight_dict.items():
-            if name in lora_pairs:
-                if name not in self.override_dict:
-                    self.override_dict[name] = param.detach().clone().cpu()
-
-                if len(lora_pairs[name])==2:
-                    name_lora_A, name_lora_B = lora_pairs[name]
-                    lora_A = lora_weights[name_lora_A].to(param.device, param.dtype)
-                    lora_B = lora_weights[name_lora_B].to(param.device, param.dtype)
-                    delta = torch.matmul(lora_B, lora_A) * alpha
-                    param.add_(delta)
-                else:
-                    name_lora = lora_pairs[name]
-                    delta = lora_weights[name_lora]* alpha
-                    param.add_(delta)
-                applied_count += 1
+        for name in tqdm(lora_pairs.keys(), desc="Loading LoRA weights"):
+            param = self.get_parameter_by_name(self.model, name)
+            if device == 'cpu':
+                dtype = torch.float32
+            else:
+                dtype = param.dtype
+            if isinstance(lora_pairs[name], tuple):
+                name_lora_A, name_lora_B = lora_pairs[name]
+                lora_A = lora_weights[name_lora_A].to(device, dtype)
+                lora_B = lora_weights[name_lora_B].to(device, dtype)
+                delta = torch.matmul(lora_B, lora_A) * alpha
+                delta = delta.to(param.device, param.dtype)
+                param.add_(delta)
+            else:
+                name_lora = lora_pairs[name]
+                delta = lora_weights[name_lora].to(param.device, dtype)* alpha
+                delta = delta.to(param.device, param.dtype)
+                param.add_(delta)
+            applied_count += 1
 
 
         logger.info(f"Applied {applied_count} LoRA weight adjustments")

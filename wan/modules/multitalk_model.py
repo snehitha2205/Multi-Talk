@@ -13,6 +13,13 @@ from diffusers.configuration_utils import ConfigMixin, register_to_config
 
 from .attention import flash_attention, SingleStreamMutiAttention
 from ..utils.multitalk_utils import get_attn_map_with_target
+import logging
+try:
+    from sageattention import sageattn
+    USE_SAGEATTN = True
+    logging.info("Using sageattn")
+except:
+    USE_SAGEATTN = False
 
 __all__ = ['WanModel']
 
@@ -144,14 +151,16 @@ class WanSelfAttention(nn.Module):
         q = rope_apply(q, grid_sizes, freqs)
         k = rope_apply(k, grid_sizes, freqs)
 
-        
-        x = flash_attention(
-            q=q,
-            k=k,
-            v=v,
-            k_lens=seq_lens,
-            window_size=self.window_size
-        ).type_as(x)
+        if USE_SAGEATTN:
+            x = sageattn(q.to(torch.bfloat16), k.to(torch.bfloat16), v, tensor_layout='NHD')
+        else:
+            x = flash_attention(
+                q=q,
+                k=k,
+                v=v,
+                k_lens=seq_lens,
+                window_size=self.window_size
+            ).type_as(x)
 
         # output
         x = x.flatten(2)
@@ -188,9 +197,13 @@ class WanI2VCrossAttention(WanSelfAttention):
         v = self.v(context).view(b, -1, n, d)
         k_img = self.norm_k_img(self.k_img(context_img)).view(b, -1, n, d)
         v_img = self.v_img(context_img).view(b, -1, n, d)
-        img_x = flash_attention(q, k_img, v_img, k_lens=None)
-        # compute attention
-        x = flash_attention(q, k, v, k_lens=context_lens)
+        if USE_SAGEATTN:
+            img_x = sageattn(q, k_img, v_img, tensor_layout='NHD')
+            x = sageattn(q, k, v, tensor_layout='NHD')
+        else:   
+            img_x = flash_attention(q, k_img, v_img, k_lens=None)
+            # compute attention
+            x = flash_attention(q, k, v, k_lens=context_lens)
 
         # output
         x = x.flatten(2)
@@ -450,7 +463,8 @@ class WanModel(ModelMixin, ConfigMixin):
                  vae_scale=4, # vae timedownsample scale
 
                  norm_input_visual=True,
-                 norm_output_audio=True):
+                 norm_output_audio=True,
+                 weight_init=True):
         super().__init__()
 
         assert model_type == 'i2v', 'MultiTalk model requires your model_type is i2v.'
@@ -527,7 +541,17 @@ class WanModel(ModelMixin, ConfigMixin):
 
 
         # initialize weights
-        self.init_weights()
+        if weight_init:
+            self.init_weights()
+            
+    def init_freqs(self):
+        d = self.dim // self.num_heads
+        self.freqs = torch.cat([
+            rope_params(1024, d - 4 * (d // 6)),
+            rope_params(1024, 2 * (d // 6)),
+            rope_params(1024, 2 * (d // 6))
+        ],
+                               dim=1)
 
     def teacache_init(
         self,

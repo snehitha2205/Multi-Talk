@@ -87,6 +87,11 @@ def _parse_args():
         default='./weights/Wan2.1-I2V-14B-480P',
         help="The path to the Wan checkpoint directory.")
     parser.add_argument(
+        "--quant_dir",
+        type=str,
+        default=None,
+        help="The path to the Wan quant checkpoint directory.")
+    parser.add_argument(
         "--wav2vec_dir",
         type=str,
         default='./weights/chinese-wav2vec2-base',
@@ -104,18 +109,6 @@ def _parse_args():
         default=[1.2],
         help="Controls how much to influence the outputs with the LoRA parameters. Accepts multiple float values."
     )
-
-
-    # parser.add_argument(
-    #     "--lora_dir",
-    #     type=str,
-    #     default=None,
-    #     help="The path to the LoRA checkpoint directory.")
-    # parser.add_argument(
-    #     "--lora_scale",
-    #     type=float,
-    #     default=1.2,
-    #     help="Controls how much to influence the outputs with the LoRA parameters.")
     parser.add_argument(
         "--offload_model",
         type=str2bool,
@@ -231,6 +224,19 @@ def _parse_args():
         type=float,
         default=55,
         help="Norm threshold used in adaptive projected guidance (APG)."
+    )
+    parser.add_argument(
+        "--color_correction_strength",
+        type=float,
+        default=1.0,
+        help="strength for color correction [0.0 -- 1.0]."
+    )
+
+    parser.add_argument(
+        "--quant",
+        type=str,
+        default=None,
+        help="Quantization type, must be 'int8' or 'fp8'."
     )
     args = parser.parse_args()
     _validate_args(args)
@@ -479,6 +485,7 @@ def run_graio_demo(args):
     wan_i2v = wan.MultiTalkPipeline(
         config=cfg,
         checkpoint_dir=args.ckpt_dir,
+        quant_dir=args.quant_dir,
         device_id=device,
         rank=rank,
         t5_fsdp=args.t5_fsdp,
@@ -486,7 +493,8 @@ def run_graio_demo(args):
         use_usp=(args.ulysses_size > 1 or args.ring_size > 1),  
         t5_cpu=args.t5_cpu,
         lora_dir=args.lora_dir,
-        lora_scales=args.lora_scale
+        lora_scales=args.lora_scale,
+        quant=args.quant
     )
 
     if args.num_persistent_param_in_dit is not None:
@@ -498,7 +506,7 @@ def run_graio_demo(args):
 
     
     def generate_video(img2vid_image, img2vid_prompt, n_prompt, img2vid_audio_1, img2vid_audio_2,
-                    sd_steps, seed, text_guide_scale, audio_guide_scale, mode_selector, tts_text, resolution_select):
+                    sd_steps, seed, text_guide_scale, audio_guide_scale, mode_selector, tts_text, resolution_select, human1_voice, human2_voice):
         input_data = {}
         input_data["prompt"] = img2vid_prompt
         input_data["cond_image"] = img2vid_image
@@ -508,7 +516,7 @@ def run_graio_demo(args):
         elif mode_selector == "Single Person(TTS)":
             tts_audio = {}
             tts_audio['text'] = tts_text
-            tts_audio['human1_voice'] = "weights/Kokoro-82M/voices/af_heart.pt"
+            tts_audio['human1_voice'] = human1_voice
             input_data["tts_audio"] = tts_audio
         elif mode_selector == "Multi Person(Local File, audio add)":
             person['person1'] = img2vid_audio_1
@@ -521,8 +529,8 @@ def run_graio_demo(args):
         else:
             tts_audio = {}
             tts_audio['text'] = tts_text
-            tts_audio['human1_voice'] = "weights/Kokoro-82M/voices/am_adam.pt"
-            tts_audio['human2_voice'] = "weights/Kokoro-82M/voices/af_heart.pt"
+            tts_audio['human1_voice'] = human1_voice
+            tts_audio['human2_voice'] = human2_voice
             input_data["tts_audio"] = tts_audio
             
         input_data["cond_audio"] = person
@@ -608,6 +616,7 @@ def run_graio_demo(args):
             n_prompt=n_prompt,
             offload_model=args.offload_model,
             max_frames_num=args.frame_num if args.mode == 'clip' else 1000,
+            color_correction_strength = args.color_correction_strength,
             extra_args=args,
             )
         
@@ -619,7 +628,7 @@ def run_graio_demo(args):
             args.save_file = f"{args.task}_{args.size.replace('*','x') if sys.platform=='win32' else args.size}_{args.ulysses_size}_{args.ring_size}_{formatted_prompt}_{formatted_time}"
         
         logging.info(f"Saving generated video to {args.save_file}.mp4")
-        save_video_ffmpeg(video, args.save_file, [input_data['video_audio']], high_quality_save=True)
+        save_video_ffmpeg(video, args.save_file, [input_data['video_audio']], high_quality_save=False)
         logging.info("Finished.")
 
         return args.save_file + '.mp4'
@@ -728,6 +737,15 @@ def run_graio_demo(args):
                             maximum=20,
                             value=2.0,
                             step=1)
+                    with gr.Row():
+                        human1_voice = gr.Textbox(
+                            label="Voice for the left person",
+                            value="weights/Kokoro-82M/voices/am_adam.pt",
+                        )
+                        human2_voice = gr.Textbox(
+                            label="Voice for right person",
+                            value="weights/Kokoro-82M/voices/af_heart.pt"
+                        )
                     # with gr.Row():
                     n_prompt = gr.Textbox(
                         label="Negative Prompt",
@@ -755,7 +773,7 @@ def run_graio_demo(args):
 
         run_i2v_button.click(
             fn=generate_video,
-            inputs=[img2vid_image, img2vid_prompt, n_prompt, img2vid_audio_1, img2vid_audio_2,sd_steps, seed, text_guide_scale, audio_guide_scale, mode_selector, tts_text, resolution_select],
+            inputs=[img2vid_image, img2vid_prompt, n_prompt, img2vid_audio_1, img2vid_audio_2,sd_steps, seed, text_guide_scale, audio_guide_scale, mode_selector, tts_text, resolution_select, human1_voice, human2_voice],
             outputs=[result_gallery],
         )
     demo.launch(server_name="0.0.0.0", debug=True, server_port=8418)

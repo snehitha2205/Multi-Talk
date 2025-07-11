@@ -86,6 +86,11 @@ def _parse_args():
         default=None,
         help="The path to the Wan checkpoint directory.")
     parser.add_argument(
+        "--quant_dir",
+        type=str,
+        default=None,
+        help="The path to the Wan quant checkpoint directory.")
+    parser.add_argument(
         "--wav2vec_dir",
         type=str,
         default=None,
@@ -226,7 +231,19 @@ def _parse_args():
         default=55,
         help="Norm threshold used in adaptive projected guidance (APG)."
     )
+    parser.add_argument(
+        "--color_correction_strength",
+        type=float,
+        default=1.0,
+        help="strength for color correction [0.0 -- 1.0]."
+    )
 
+    parser.add_argument(
+        "--quant",
+        type=str,
+        default=None,
+        help="Quantization type, must be 'int8' or 'fp8'."
+    )
     
     args = parser.parse_args()
 
@@ -565,6 +582,7 @@ def generate(args):
     wan_i2v = wan.MultiTalkPipeline(
         config=cfg,
         checkpoint_dir=args.ckpt_dir,
+        quant_dir=args.quant_dir,
         device_id=device,
         rank=rank,
         t5_fsdp=args.t5_fsdp,
@@ -572,7 +590,8 @@ def generate(args):
         use_usp=(args.ulysses_size > 1 or args.ring_size > 1),  
         t5_cpu=args.t5_cpu,
         lora_dir=args.lora_dir,
-        lora_scales=args.lora_scale
+        lora_scales=args.lora_scale,
+        quant=args.quant
     )
 
 
@@ -595,6 +614,7 @@ def generate(args):
         seed=args.base_seed,
         offload_model=args.offload_model,
         max_frames_num=args.frame_num if args.mode == 'clip' else 1000,
+        color_correction_strength = args.color_correction_strength,
         extra_args=args,
         )
     
@@ -608,7 +628,7 @@ def generate(args):
             args.save_file = f"{args.task}_{args.size.replace('*','x') if sys.platform=='win32' else args.size}_{args.ulysses_size}_{args.ring_size}_{formatted_prompt}_{formatted_time}"
         
         logging.info(f"Saving generated video to {args.save_file}.mp4")
-        save_video_ffmpeg(video, args.save_file, [input_data['video_audio']], high_quality_save=True)
+        save_video_ffmpeg(video, args.save_file, [input_data['video_audio']], high_quality_save=False)
         
     logging.info("Finished.")
 

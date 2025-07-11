@@ -3,13 +3,20 @@ import copy
 import torch
 
 from src.utils import init_weights_on_device
-
+import optimum.quanto.nn.qlinear as qlinear
 
 def cast_to(weight, dtype, device):
     r = torch.empty_like(weight, dtype=dtype, device=device)
     r.copy_(weight)
     return r
 
+def cast_to_device(weight, device):
+    if hasattr(weight, '__class__') and 'optimum.quanto' in str(weight.__class__):  
+        return weight.to(device)
+    else:
+        r = torch.empty_like(weight, device=device)
+        r.copy_(weight)
+        return r
 
 class AutoWrappedModule(torch.nn.Module):
     def __init__(
@@ -60,6 +67,63 @@ class AutoWrappedModule(torch.nn.Module):
             )
         return module(*args, **kwargs)
 
+
+
+class AutoWrappedQLinear(qlinear.QLinear):
+    def __init__(
+        self,
+        module: qlinear.QLinear,
+        offload_dtype,
+        offload_device,
+        onload_dtype,
+        onload_device,
+        computation_dtype,
+        computation_device,
+    ):
+        with init_weights_on_device(device=torch.device("meta")):
+            super().__init__(
+                in_features=module.in_features,
+                out_features=module.out_features,
+                bias=module.bias is not None,
+                device=offload_device,
+            )
+        self.weight = module.weight
+        self.bias = module.bias
+        self.offload_device = offload_device
+
+        self.onload_device = onload_device
+        self.computation_device = computation_device
+        self.state = 0
+
+    def offload(self):
+        if self.state == 1 and (
+             self.offload_device != self.onload_device
+        ):
+            self.to(device=self.offload_device)
+            self.state = 0
+
+    def onload(self):
+        if self.state == 0 and (
+            self.offload_device != self.onload_device
+        ):
+            self.to(device=self.onload_device)
+            self.state = 1
+
+    def forward(self, x, *args, **kwargs):
+        if (
+            self.onload_device == self.computation_device
+        ):
+            
+            return torch.nn.functional.linear(x, self.weight, bias=self.bias)
+        else:
+            
+            qweight = cast_to_device(self.weight, self.computation_device)
+            bias = (
+                None
+                if self.bias is None
+                else cast_to_device(self.bias, self.computation_device)
+            )
+            return torch.nn.functional.linear(x, qweight, bias)
 
 class AutoWrappedLinear(torch.nn.Linear):
     def __init__(
