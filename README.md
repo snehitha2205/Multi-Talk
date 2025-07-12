@@ -80,7 +80,7 @@ We propose **MultiTalk** , a novel framework for audio-driven multi-person conve
 
 ## 🔥 Latest News
 
-* July 11, 2025: 🔥🔥 `MultiTalk` supports INT8 quantization and CFG strategy updation(with lora).
+* July 11, 2025: 🔥🔥 `MultiTalk` supports INT8 [quantization](https://github.com/huggingface/optimum-quanto) and [SageAttention2.2](https://github.com/thu-ml/SageAttention), and updates the CFG strategy (2 NFE per step) for FusionX LoRA, 
 * July 01, 2025: 🔥🔥 `MultiTalk` supports input audios with TTS, [FusioniX](https://huggingface.co/vrgamedevgirl84/Wan14BT2VFusioniX/blob/main/FusionX_LoRa/Wan2.1_I2V_14B_FusionX_LoRA.safetensors) and [lightx2v](https://huggingface.co/Kijai/WanVideo_comfy/blob/main/Wan21_T2V_14B_lightx2v_cfg_step_distill_lora_rank32.safetensors) LoRA acceleration (requires only 4~8 steps), and Gradio.
 * June 14, 2025: 🔥🔥 We release `MultiTalk` with support for `multi-GPU inference`, `teacache acceleration`, `APG` and `low-VRAM inference` (enabling 480P video generation on a single RTX 4090). [APG](https://arxiv.org/abs/2410.02416) is used to alleviate the color error accumulation in long video generation. TeaCache is capable of increasing speed by approximately 2~3x.
 * June 9, 2025: 🔥🔥 We release the [weights](https://huggingface.co/MeiGen-AI/MeiGen-MultiTalk) and inference code of **MultiTalk** 
