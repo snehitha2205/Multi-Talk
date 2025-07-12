@@ -430,11 +430,20 @@ python app.py \
 ```
 
 ## 🚀Computational Efficiency
+
+#### 1) Non quantitative results
+
 The results are evaluated on A100 GPUs for multi-person generation. Single-person generation uses less memory and provides faster inference.
 <p align="center">
   <img src="assets/efficiency.png">
 </p>
 TeaCache is capable of increasing speed by approximately 2~3x.
+
+#### 2) Quantitative results
+
+<p align="center">
+  <img src="assets/none_quant_efficiency.png">
+</p>
 
 
 ## 📚 Citation
