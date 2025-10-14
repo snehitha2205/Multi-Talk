@@ -1,8 +1,16 @@
 # Copyright 2024-2025 The Alibaba Wan Team Authors. All rights reserved.
+import os
+os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
+os.environ.setdefault("TORCH_CUDA_ARCH_LIST", "")
+
+
+
 import argparse
 import logging
 import os
 os.environ["no_proxy"] = "localhost,127.0.0.1,::1"
+os.environ["WAN_DISABLE_XFUSER"] = "1"
+
 import sys
 import json
 import warnings
@@ -422,21 +430,26 @@ def run_graio_demo(args):
     rank = int(os.getenv("RANK", 0))
     world_size = int(os.getenv("WORLD_SIZE", 1))
     local_rank = int(os.getenv("LOCAL_RANK", 0))
-    device = local_rank
+    #device = local_rank
+    device = "cpu"
     _init_logging(rank)
 
     if args.offload_model is None:
         args.offload_model = False if world_size > 1 else True
         logging.info(
             f"offload_model is not specified, set to {args.offload_model}.")
-    if world_size > 1:
+    if world_size > 1 and torch.cuda.is_available():
         torch.cuda.set_device(local_rank)
         dist.init_process_group(
-            backend="nccl",
+            backend="gloo",
             init_method="env://",
             rank=rank,
-            world_size=world_size)
+            world_size=world_size
+        )
     else:
+        if not torch.cuda.is_available():
+            logging.warning("CUDA not available. Running on CPU only.")
+
         assert not (
             args.t5_fsdp or args.dit_fsdp
         ), f"t5_fsdp and dit_fsdp are not supported in non-distributed environments."
@@ -472,7 +485,9 @@ def run_graio_demo(args):
         dist.broadcast_object_list(base_seed, src=0)
         args.base_seed = base_seed[0]
 
-    assert args.task == "multitalk-14B", 'You should choose multitalk in args.task.'
+    # assert args.task == "multitalk-14B", 'You should choose multitalk in args.task.'
+    assert args.task in ["multitalk-14B", "multitalk-1.3B"], 'You should choose multitalk-14B or multitalk-1.3B in args.task.'
+
     
 
     
@@ -486,7 +501,7 @@ def run_graio_demo(args):
         config=cfg,
         checkpoint_dir=args.ckpt_dir,
         quant_dir=args.quant_dir,
-        device_id=device,
+        device_id="cpu",
         rank=rank,
         t5_fsdp=args.t5_fsdp,
         dit_fsdp=args.dit_fsdp, 
