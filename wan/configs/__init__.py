@@ -8,6 +8,7 @@ from .wan_i2v_14B import i2v_14B
 from .wan_t2v_1_3B import t2v_1_3B
 from .wan_t2v_14B import t2v_14B
 from .wan_multitalk_14B import multitalk_14B
+from .wan_multitalk_1_3B import multitalk_1_3B  #added
 
 # the config of t2i_14B is the same as t2v_14B
 t2i_14B = copy.deepcopy(t2v_14B)
@@ -27,6 +28,7 @@ WAN_CONFIGS = {
     'vace-1.3B': t2v_1_3B,
     'vace-14B': t2v_14B,
     'multitalk-14B': multitalk_14B,
+    'multitalk-1.3B': multitalk_1_3B, #added
 }
 
 SIZE_CONFIGS = {
@@ -55,4 +57,5 @@ SUPPORTED_SIZES = {
     'vace-1.3B': ('480*832', '832*480'),
     'vace-14B': ('720*1280', '1280*720', '480*832', '832*480'),
     'multitalk-14B': ('multitalk-480', 'multitalk-720'),
+    'multitalk-1.3B': ('multitalk-480',), #added
 }
