@@ -56,7 +56,7 @@ def _validate_args(args):
         elif args.size == 'multitalk-720':
             args.sample_shift = 11
         else:
-            raise NotImplementedError(f'Not supported size')
+            args.sample_shift = 0
 
     args.base_seed = args.base_seed if args.base_seed >= 0 else random.randint(
         0, 99999999)

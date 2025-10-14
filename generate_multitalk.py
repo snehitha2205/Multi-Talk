@@ -47,7 +47,7 @@ def _validate_args(args):
         elif args.size == 'multitalk-720':
             args.sample_shift = 11
         else:
-            raise NotImplementedError(f'Not supported size')
+            args.sample_shift = 0
 
     args.base_seed = args.base_seed if args.base_seed >= 0 else random.randint(
         0, 99999999)
@@ -358,7 +358,7 @@ def audio_prepare_single(audio_path, sample_rate=16000):
 def process_tts_single(text, save_dir, voice1):    
     s1_sentences = []
 
-    pipeline = KPipeline(lang_code='a', repo_id='/content/multitalk-wts-run/Kokoro-82M')
+    pipeline = KPipeline(lang_code='a', repo_id='weights/Kokoro-82M')
 
     voice_tensor = torch.load(voice1, weights_only=True)
     generator = pipeline(
@@ -379,7 +379,7 @@ def process_tts_single(text, save_dir, voice1):
    
 
 def process_tts_multi(text, save_dir, voice1, voice2):
-    pattern = r'\(s(\d+)\)\s*(.*?)(?=\s*\(s\d+\)|$)'
+    pattern = r'\(s(\d+)\)\s*(.?)(?=\s\(s\d+\)|$)'
     matches = re.findall(pattern, text, re.DOTALL)
     
     s1_sentences = []
@@ -485,7 +485,7 @@ def generate(args):
 
     cfg = WAN_CONFIGS[args.task]
     if args.ulysses_size > 1:
-        assert cfg.num_heads % args.ulysses_size == 0, f"`{cfg.num_heads=}` cannot be divided evenly by `{args.ulysses_size=}`."
+        assert cfg.num_heads % args.ulysses_size == 0, f"{cfg.num_heads=} cannot be divided evenly by {args.ulysses_size=}."
 
     logging.info(f"Generation job args: {args}")
     logging.info(f"Generation model config: {cfg}")
@@ -495,7 +495,9 @@ def generate(args):
         dist.broadcast_object_list(base_seed, src=0)
         args.base_seed = base_seed[0]
 
-    assert args.task == "multitalk-14B", 'You should choose multitalk in args.task.'
+    if args.task not in ["multitalk-14B", "t2v-1.3B"]:
+     raise ValueError(f"Unsupported task: {args.task}")
+
     
 
     # TODO: add prompt refine
@@ -625,7 +627,7 @@ def generate(args):
             formatted_time = datetime.now().strftime("%Y%m%d_%H%M%S")
             formatted_prompt = input_data['prompt'].replace(" ", "_").replace("/",
                                                                         "_")[:50]
-            args.save_file = f"{args.task}_{args.size.replace('*','x') if sys.platform=='win32' else args.size}_{args.ulysses_size}_{args.ring_size}_{formatted_prompt}_{formatted_time}"
+            args.save_file = f"{args.task}{args.size.replace('*','x') if sys.platform=='win32' else args.size}{args.ulysses_size}{args.ring_size}{formatted_prompt}_{formatted_time}"
         
         logging.info(f"Saving generated video to {args.save_file}.mp4")
         save_video_ffmpeg(video, args.save_file, [input_data['video_audio']], high_quality_save=False)

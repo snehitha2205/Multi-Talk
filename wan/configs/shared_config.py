@@ -4,7 +4,7 @@ from easydict import EasyDict
 
 #------------------------ Wan shared config ------------------------#
 wan_shared_cfg = EasyDict()
-
+ 
 # t5
 wan_shared_cfg.t5_model = 'umt5_xxl'
 wan_shared_cfg.t5_dtype = torch.bfloat16
