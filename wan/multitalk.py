@@ -176,13 +176,14 @@ class MultiTalkPipeline:
             vae_pth=os.path.join(checkpoint_dir, config.vae_checkpoint),
             device=self.device)
 
-        self.clip = CLIPModel(
-            dtype=getattr(config, "clip_dtype", torch.float16),
-            device=self.device,
-            checkpoint_path=os.path.join(checkpoint_dir,
-                                         config.clip_checkpoint),
-            tokenizer_path=os.path.join(checkpoint_dir, config.clip_tokenizer))
-
+        if hasattr(config, "clip_checkpoint") and hasattr(config, "clip_tokenizer"):
+            self.clip = CLIPModel(
+                dtype=getattr(config, "clip_dtype", torch.float16),
+                device=self.device,
+                checkpoint_path=os.path.join(checkpoint_dir, config.clip_checkpoint),
+                tokenizer_path=os.path.join(checkpoint_dir, config.clip_tokenizer))
+        else:
+            self.clip = None
         logging.info(f"Creating WanModel from {checkpoint_dir}")
         if quant is not None:
             logging.info(f"Loading Quantized MultiTalk from {os.path.join(quant_dir,'quant_models')}")
