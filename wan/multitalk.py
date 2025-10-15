@@ -177,7 +177,7 @@ class MultiTalkPipeline:
             device=self.device)
 
         self.clip = CLIPModel(
-            dtype=config.clip_dtype,
+            dtype=getattr(config, "clip_dtype", torch.float16),
             device=self.device,
             checkpoint_path=os.path.join(checkpoint_dir,
                                          config.clip_checkpoint),
