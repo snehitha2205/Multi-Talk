@@ -1,6 +1,7 @@
 # Copied from https://github.com/huggingface/diffusers/blob/v0.31.0/src/diffusers/schedulers/scheduling_unipc_multistep.py
 # Convert unipc for flow matching
 # Copyright 2024-2025 The Alibaba Wan Team Authors. All rights reserved.
+#addresses sampling schedule and noise scheduling
 
 import math
 from typing import List, Optional, Tuple, Union

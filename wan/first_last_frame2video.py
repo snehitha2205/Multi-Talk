@@ -1,4 +1,6 @@
 # Copyright 2024-2025 The Alibaba Wan Team Authors. All rights reserved.
+#high level video generation pipeline for generating video from first and last frames with a textual prompt
+
 import gc
 import logging
 import math

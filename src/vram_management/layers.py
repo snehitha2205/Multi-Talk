@@ -1,3 +1,5 @@
+#it dynamically offloads parts of model to cpu or gpu acc to model to lower the gpu memory usage
+
 import copy
 
 import torch

@@ -1,3 +1,4 @@
+#take audio input at a time - extract features, resizing, masking and encoding
 from transformers import Wav2Vec2Config, Wav2Vec2Model
 from transformers.modeling_outputs import BaseModelOutput
 

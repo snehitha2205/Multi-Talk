@@ -1,3 +1,5 @@
+#process attention tensors, positional encodings, video saving and color correction
+
 import os
 from einops import rearrange
 

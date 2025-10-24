@@ -536,29 +536,32 @@ def generate(args):
         args.audio_save_dir = os.path.join(args.audio_save_dir, input_data['cond_image'].split('/')[-1].split('.')[0])
         os.makedirs(args.audio_save_dir,exist_ok=True)
         
-        if args.audio_mode=='localfile':
-            if len(input_data['cond_audio'])==2:
-                new_human_speech1, new_human_speech2, sum_human_speechs = audio_prepare_multi(input_data['cond_audio']['person1'], input_data['cond_audio']['person2'], input_data['audio_type'])
-                audio_embedding_1 = get_embedding(new_human_speech1, wav2vec_feature_extractor, audio_encoder)
-                audio_embedding_2 = get_embedding(new_human_speech2, wav2vec_feature_extractor, audio_encoder)
-                emb1_path = os.path.join(args.audio_save_dir, '1.pt')
-                emb2_path = os.path.join(args.audio_save_dir, '2.pt')
-                sum_audio = os.path.join(args.audio_save_dir, 'sum.wav')
-                sf.write(sum_audio, sum_human_speechs, 16000)
-                torch.save(audio_embedding_1, emb1_path)
-                torch.save(audio_embedding_2, emb2_path)
-                input_data['cond_audio']['person1'] = emb1_path
-                input_data['cond_audio']['person2'] = emb2_path
-                input_data['video_audio'] = sum_audio
-            elif len(input_data['cond_audio'])==1:
-                human_speech = audio_prepare_single(input_data['cond_audio']['person1'])
-                audio_embedding = get_embedding(human_speech, wav2vec_feature_extractor, audio_encoder)
-                emb_path = os.path.join(args.audio_save_dir, '1.pt')
-                sum_audio = os.path.join(args.audio_save_dir, 'sum.wav')
-                sf.write(sum_audio, human_speech, 16000)
-                torch.save(audio_embedding, emb_path)
-                input_data['cond_audio']['person1'] = emb_path
-                input_data['video_audio'] = sum_audio
+        if args.audio_mode == 'localfile':
+            num_speakers = len(input_data['cond_audio'])
+            all_audio_arrays = []
+            all_embeddings = []
+            all_audio_paths = []
+
+            for i in range(num_speakers):
+                key = f'person{i+1}'
+                audio_path = input_data['cond_audio'].get(key)
+                if audio_path is not None:
+                    speech = audio_prepare_single(audio_path)
+                    all_audio_arrays.append(speech)
+                    emb = get_embedding(speech, wav2vec_feature_extractor, audio_encoder)
+                    emb_path = os.path.join(args.audio_save_dir, f'{i+1}.pt')
+                    torch.save(emb, emb_path)
+                    input_data['cond_audio'][key] = emb_path
+                    all_embeddings.append(emb)
+                    all_audio_paths.append(audio_path)
+
+            if len(all_audio_arrays) > 0:
+                max_len = max([len(a) for a in all_audio_arrays])
+                padded = [np.pad(a, (0, max_len - len(a))) for a in all_audio_arrays]
+                sum_audio = np.sum(padded, axis=0)
+                sum_audio_path = os.path.join(args.audio_save_dir, 'sum.wav')
+                sf.write(sum_audio_path, sum_audio, 16000)
+                input_data['video_audio'] = sum_audio_path
         elif args.audio_mode=='tts':
             if 'human2_voice' not in input_data['tts_audio'].keys():
                 new_human_speech1, sum_audio = process_tts_single(input_data['tts_audio']['text'], args.audio_save_dir, input_data['tts_audio']['human1_voice'])

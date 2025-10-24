@@ -1,4 +1,5 @@
 # Copyright 2024-2025 The Alibaba Wan Team Authors. All rights reserved.
+#changed
 import os
 os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
 os.environ.setdefault("TORCH_CUDA_ARCH_LIST", "")
@@ -528,51 +529,68 @@ def run_graio_demo(args):
         person = {}
         if mode_selector == "Single Person(Local File)":
             person['person1'] = img2vid_audio_1
+
         elif mode_selector == "Single Person(TTS)":
             tts_audio = {}
             tts_audio['text'] = tts_text
             tts_audio['human1_voice'] = human1_voice
             input_data["tts_audio"] = tts_audio
+
         elif mode_selector == "Multi Person(Local File, audio add)":
             person['person1'] = img2vid_audio_1
             person['person2'] = img2vid_audio_2
+            if img2vid_audio_3:  # Add this for optional 3rd speaker
+                person['person3'] = img2vid_audio_3
             input_data["audio_type"] = 'add'
+
         elif mode_selector == "Multi Person(Local File, audio parallel)":
             person['person1'] = img2vid_audio_1
             person['person2'] = img2vid_audio_2
+            if img2vid_audio_3:
+                person['person3'] = img2vid_audio_3
             input_data["audio_type"] = 'para'
-        else:
-            tts_audio = {}
-            tts_audio['text'] = tts_text
-            tts_audio['human1_voice'] = human1_voice
-            tts_audio['human2_voice'] = human2_voice
+
+        elif mode_selector == "Multi Person(TTS)":
+            tts_audio = {
+                'text': tts_text,
+                'human1_voice': human1_voice,
+                'human2_voice': human2_voice
+            }
+            if human3_voice:  # Add this new parameter in UI too
+                tts_audio['human3_voice'] = human3_voice
             input_data["tts_audio"] = tts_audio
-            
+
         input_data["cond_audio"] = person
 
+
         if 'Local File' in mode_selector:
-            if len(input_data['cond_audio'])==2:
-                new_human_speech1, new_human_speech2, sum_human_speechs = audio_prepare_multi(input_data['cond_audio']['person1'], input_data['cond_audio']['person2'], input_data['audio_type'])
-                audio_embedding_1 = get_embedding(new_human_speech1, wav2vec_feature_extractor, audio_encoder)
-                audio_embedding_2 = get_embedding(new_human_speech2, wav2vec_feature_extractor, audio_encoder)
-                emb1_path = os.path.join(args.audio_save_dir, '1.pt')
-                emb2_path = os.path.join(args.audio_save_dir, '2.pt')
-                sum_audio = os.path.join(args.audio_save_dir, 'sum.wav')
-                sf.write(sum_audio, sum_human_speechs, 16000)
-                torch.save(audio_embedding_1, emb1_path)
-                torch.save(audio_embedding_2, emb2_path)
-                input_data['cond_audio']['person1'] = emb1_path
-                input_data['cond_audio']['person2'] = emb2_path
-                input_data['video_audio'] = sum_audio
-            elif len(input_data['cond_audio'])==1:
-                human_speech = audio_prepare_single(input_data['cond_audio']['person1'])
-                audio_embedding = get_embedding(human_speech, wav2vec_feature_extractor, audio_encoder)
-                emb_path = os.path.join(args.audio_save_dir, '1.pt')
-                sum_audio = os.path.join(args.audio_save_dir, 'sum.wav')
-                sf.write(sum_audio, human_speech, 16000)
-                torch.save(audio_embedding, emb_path)
-                input_data['cond_audio']['person1'] = emb_path
-                input_data['video_audio'] = sum_audio
+            num_speakers = len(input_data['cond_audio'])
+            all_audio_arrays = []
+            all_embeddings = []
+            all_audio_paths = []
+
+            for i in range(num_speakers):
+                key = f'person{i+1}'
+                audio_path = input_data['cond_audio'][key]
+                if audio_path is not None:
+                    speech = audio_prepare_single(audio_path)
+                    all_audio_arrays.append(speech)
+                    emb = get_embedding(speech, wav2vec_feature_extractor, audio_encoder)
+                    emb_path = os.path.join(args.audio_save_dir, f'{i+1}.pt')
+                    torch.save(emb, emb_path)
+                    input_data['cond_audio'][key] = emb_path
+                    all_embeddings.append(emb)
+                    all_audio_paths.append(audio_path)
+
+            # Combine all audios for reference video soundtrack
+            if len(all_audio_arrays) > 0:
+                max_len = max([len(a) for a in all_audio_arrays])
+                padded = [np.pad(a, (0, max_len - len(a))) for a in all_audio_arrays]
+                sum_audio = np.sum(padded, axis=0)
+                sum_audio_path = os.path.join(args.audio_save_dir, 'sum.wav')
+                sf.write(sum_audio_path, sum_audio, 16000)
+                input_data['video_audio'] = sum_audio_path
+
         elif 'TTS' in mode_selector:
             if 'human2_voice' not in input_data['tts_audio'].keys():
                 new_human_speech1, sum_audio = process_tts_single(input_data['tts_audio']['text'], args.audio_save_dir, input_data['tts_audio']['human1_voice'])
@@ -713,6 +731,7 @@ def run_graio_demo(args):
                     )
                     img2vid_audio_1 = gr.Audio(label="Conditioning Audio for speaker 1", type="filepath", visible=True)
                     img2vid_audio_2 = gr.Audio(label="Conditioning Audio for speaker 2", type="filepath", visible=False)
+                    img2vid_audio_3 = gr.Audio(label="Conditioning Audio for speaker 3 (optional)", type="filepath", visible=False)
                     tts_text = gr.Textbox(
                         label="Text for TTS",
                         placeholder="Refer to the format in the examples",
@@ -722,8 +741,9 @@ def run_graio_demo(args):
                     mode_selector.change(
                         fn=toggle_audio_mode,
                         inputs=mode_selector,
-                        outputs=[img2vid_audio_1, img2vid_audio_2, tts_text]
+                        outputs=[img2vid_audio_1, img2vid_audio_2, img2vid_audio_3, tts_text]
                     )
+
 
                 with gr.Accordion("Advanced Options", open=False):
                     with gr.Row():
@@ -761,6 +781,10 @@ def run_graio_demo(args):
                             label="Voice for right person",
                             value="weights/Kokoro-82M/voices/af_heart.pt"
                         )
+                        human3_voice = gr.Textbox(
+                            label="Voice for third person (optional)",
+                            value="weights/Kokoro-82M/voices/am_martin.pt",
+                        )
                     # with gr.Row():
                     n_prompt = gr.Textbox(
                         label="Negative Prompt",
@@ -788,9 +812,27 @@ def run_graio_demo(args):
 
         run_i2v_button.click(
             fn=generate_video,
-            inputs=[img2vid_image, img2vid_prompt, n_prompt, img2vid_audio_1, img2vid_audio_2,sd_steps, seed, text_guide_scale, audio_guide_scale, mode_selector, tts_text, resolution_select, human1_voice, human2_voice],
+            inputs=[
+                img2vid_image,
+                img2vid_prompt,
+                n_prompt,
+                img2vid_audio_1,
+                img2vid_audio_2,
+                img2vid_audio_3,  # NEW
+                sd_steps,
+                seed,
+                text_guide_scale,
+                audio_guide_scale,
+                mode_selector,
+                tts_text,
+                resolution_select,
+                human1_voice,
+                human2_voice,
+                human3_voice,  # NEW
+            ],
             outputs=[result_gallery],
         )
+
     demo.launch(server_name="0.0.0.0", debug=True, server_port=8418)
 
         

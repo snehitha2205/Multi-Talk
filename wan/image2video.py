@@ -1,4 +1,6 @@
 # Copyright 2024-2025 The Alibaba Wan Team Authors. All rights reserved.
+#image to video generation conditioned on text prompts
+
 import gc
 import logging
 import math

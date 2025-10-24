@@ -1,3 +1,5 @@
+#for masking padded sequences and resizing the embeddings
+
 import torch
 import torch.nn.functional as F
 

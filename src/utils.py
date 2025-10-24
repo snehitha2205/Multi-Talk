@@ -1,3 +1,5 @@
+#manages device placement of model weights during initialization efficiently
+
 from contextlib import contextmanager
 
 import torch

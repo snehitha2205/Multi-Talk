@@ -1,3 +1,5 @@
+#implement attention mechanism
+
 # Copyright 2024-2025 The Alibaba Wan Team Authors. All rights reserved.
 import numpy as np
 import torch
@@ -506,15 +508,38 @@ def usp_crossattn_multi_forward_multitalk(self,
         max_min_values = torch.cat([max_values, min_values], dim=2)
         max_min_values = get_sp_group().all_gather(max_min_values, dim=1)
 
-        human1_max_value, human1_min_value = max_min_values[0, :, 0].max(), max_min_values[0, :, 1].min()
-        human2_max_value, human2_min_value = max_min_values[1, :, 0].max(), max_min_values[1, :, 1].min()
+       # Dynamically compute normalized attention for any speaker count (1–3)
+        human_maps = []
+        num_speakers = min(human_num, len(x_ref_attn_map))
 
-        human1 = normalize_and_scale(x_ref_attn_map[0], (human1_min_value, human1_max_value), (self.rope_h1[0], self.rope_h1[1]))
-        human2 = normalize_and_scale(x_ref_attn_map[1], (human2_min_value, human2_max_value), (self.rope_h2[0], self.rope_h2[1]))
-        back   = torch.full((x_ref_attn_map.size(1),), self.rope_bak, dtype=human1.dtype).to(human1.device)
+        # Normalize each speaker’s attention map
+        for i in range(num_speakers):
+            speaker_max = max_min_values[i, :, 0].max()
+            speaker_min = max_min_values[i, :, 1].min()
+            
+            # Use corresponding rope embedding bounds dynamically (rope_h1, rope_h2, rope_h3 if defined)
+            rope_attr = getattr(self, f"rope_h{i+1}", (0, 1))
+            human_map = normalize_and_scale(
+                x_ref_attn_map[i],
+                (speaker_min, speaker_max),
+                rope_attr
+            )
+            human_maps.append(human_map)
+
+        # Add background map
+        background = torch.full(
+            (x_ref_attn_map.size(1),),
+            getattr(self, "rope_bak", 0.0),
+            dtype=x_ref_attn_map.dtype,
+            device=x_ref_attn_map.device
+        )
+        human_maps.append(background)
+
+        # Stack to get normalized position map
         max_indices = x_ref_attn_map.argmax(dim=0)
-        normalized_map = torch.stack([human1, human2, back], dim=1)
-        normalized_pos = normalized_map[range(x_ref_attn_map.size(1)), max_indices] # N 
+        normalized_map = torch.stack(human_maps, dim=1)
+        normalized_pos = normalized_map[range(x_ref_attn_map.size(1)), max_indices]
+
         q = self.rope_1d(q, normalized_pos)
  
         encoder_kv = self.kv_linear(encoder_hidden_states) 
@@ -526,10 +551,18 @@ def usp_crossattn_multi_forward_multitalk(self,
             encoder_k = self.add_k_norm(encoder_k)
 
         # position embedding for condition audio embeddings
-        per_frame = torch.zeros(audio_tokens_per_frame * human_num, dtype=encoder_k.dtype).to(encoder_k.device)
-        per_frame[:audio_tokens_per_frame] = (self.rope_h1[0] + self.rope_h1[1]) / 2
-        per_frame[audio_tokens_per_frame:] = (self.rope_h2[0] + self.rope_h2[1]) / 2
-        encoder_pos = torch.concat([per_frame]*N_a, dim=0)
+       # Dynamically assign rope positional bounds for each speaker section
+        per_frame = torch.zeros(audio_tokens_per_frame * human_num, dtype=encoder_k.dtype, device=encoder_k.device)
+
+        # Distribute positional sections dynamically
+        for i in range(human_num):
+            rope_attr = getattr(self, f"rope_h{i+1}", (0, 1))
+            start = i * audio_tokens_per_frame
+            end = (i + 1) * audio_tokens_per_frame
+            per_frame[start:end] = torch.tensor((rope_attr[0] + rope_attr[1]) / 2, dtype=encoder_k.dtype, device=encoder_k.device)
+
+        # Repeat this pattern for every frame
+        encoder_pos = torch.cat([per_frame] * N_a, dim=0)
         encoder_k = self.rope_1d(encoder_k, encoder_pos)
 
         # get attn

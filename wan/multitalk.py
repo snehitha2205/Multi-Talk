@@ -1,6 +1,8 @@
 # Copyright 2024-2025 The Alibaba Wan Team Authors. All rights reserved.
+#for iterative video diffusion generation
+#changed
 import gc
-from inspect import getfullargspec
+from inspect import ArgSpec
 import logging
 import json
 import math
@@ -176,14 +178,13 @@ class MultiTalkPipeline:
             vae_pth=os.path.join(checkpoint_dir, config.vae_checkpoint),
             device=self.device)
 
-        if hasattr(config, "clip_checkpoint") and hasattr(config, "clip_tokenizer"):
-            self.clip = CLIPModel(
-                dtype=getattr(config, "clip_dtype", torch.float16),
-                device=self.device,
-                checkpoint_path=os.path.join(checkpoint_dir, config.clip_checkpoint),
-                tokenizer_path=os.path.join(checkpoint_dir, config.clip_tokenizer))
-        else:
-            self.clip = None
+        self.clip = CLIPModel(
+            dtype=config.clip_dtype,
+            device=self.device,
+            checkpoint_path=os.path.join(checkpoint_dir,
+                                         config.clip_checkpoint),
+            tokenizer_path=os.path.join(checkpoint_dir, config.clip_tokenizer))
+
         logging.info(f"Creating WanModel from {checkpoint_dir}")
         if quant is not None:
             logging.info(f"Loading Quantized MultiTalk from {os.path.join(quant_dir,'quant_models')}")
@@ -419,19 +420,17 @@ class MultiTalkPipeline:
 
 
         # read audio embeddings
-        audio_embedding_path_1 = input_data['cond_audio']['person1']
-        if len(input_data['cond_audio']) == 1:
-            HUMAN_NUMBER = 1
-            audio_embedding_path_2 = None
-        else:
-            HUMAN_NUMBER = 2
-            audio_embedding_path_2 = input_data['cond_audio']['person2']
+       # Dynamically read all available person audio embeddings from input_data ('person1', 'person2', 'person3')
+        audio_embedding_paths = []
+        for i in range(1, 4):  # support persons 1 to 3
+            key = f'person{i}'
+            if key in input_data['cond_audio'] and input_data['cond_audio'][key] is not None:
+                audio_embedding_paths.append(input_data['cond_audio'][key])
 
-        
-        full_audio_embs = []        
-        audio_embedding_paths = [audio_embedding_path_1, audio_embedding_path_2]
-        for human_idx in range(HUMAN_NUMBER):   
-            audio_embedding_path = audio_embedding_paths[human_idx]
+        HUMAN_NUMBER = len(audio_embedding_paths)
+
+        full_audio_embs = []
+        for audio_embedding_path in audio_embedding_paths:
             if not os.path.exists(audio_embedding_path):
                 continue
             full_audio_emb = torch.load(audio_embedding_path)
@@ -439,9 +438,10 @@ class MultiTalkPipeline:
                 continue
             if full_audio_emb.shape[0] <= frame_num:
                 continue
-            full_audio_embs.append(full_audio_emb) 
-        
-        assert len(full_audio_embs) == HUMAN_NUMBER, f"Aduio file not exists or length not satisfies frame nums."
+            full_audio_embs.append(full_audio_emb)
+
+        assert len(full_audio_embs) == HUMAN_NUMBER, "Audio files missing or lengths insufficient"
+
 
         # preprocess text embedding
         if n_prompt == "":
@@ -571,6 +571,40 @@ class MultiTalkPipeline:
                     human_masks = [human_mask1, human_mask2]
                 background_mask = torch.where(background_mask > 0, torch.tensor(0), torch.tensor(1))
                 human_masks.append(background_mask)
+
+            elif HUMAN_NUMBER == 3:
+                if 'bbox' in input_data:
+                    # Use bounding boxes if available
+                    assert len(input_data['bbox']) == len(input_data['cond_audio']), \
+                        f"The number of target bbox should be the same with cond_audio"
+                    background_mask = torch.zeros([src_h, src_w])
+                    for _, person_bbox in input_data['bbox'].items():
+                        x_min, y_min, x_max, y_max = person_bbox
+                        human_mask = torch.zeros([src_h, src_w])
+                        human_mask[int(x_min):int(x_max), int(y_min):int(y_max)] = 1
+                        background_mask += human_mask
+                        human_masks.append(human_mask)
+                else:
+                    # Fallback: divide the frame into 3 horizontal regions dynamically
+                    x_min, x_max = int(src_h * face_scale), int(src_h * (1 - face_scale))
+                    background_mask = torch.zeros([src_h, src_w])
+                    third_width = src_w // 3
+                    human_mask1 = torch.zeros([src_h, src_w])
+                    human_mask2 = torch.zeros([src_h, src_w])
+                    human_mask3 = torch.zeros([src_h, src_w])
+                    left_min, left_max = int(third_width * face_scale), int(third_width * (1 - face_scale))
+                    mid_min, mid_max = int(third_width + third_width * face_scale), int(2 * third_width - third_width * face_scale)
+                    right_min, right_max = int(2 * third_width + third_width * face_scale), int(src_w - third_width * face_scale)
+                    human_mask1[x_min:x_max, left_min:left_max] = 1
+                    human_mask2[x_min:x_max, mid_min:mid_max] = 1
+                    human_mask3[x_min:x_max, right_min:right_max] = 1
+                    background_mask += human_mask1 + human_mask2 + human_mask3
+                    human_masks = [human_mask1, human_mask2, human_mask3]
+                # Calculate background region (inverse of human regions)
+                background_mask = torch.where(background_mask > 0, torch.tensor(0), torch.tensor(1))
+                human_masks.append(background_mask)
+
+
 
             ref_target_masks = torch.stack(human_masks, dim=0).to(self.device)
             # resize and centercrop for ref_target_masks 
