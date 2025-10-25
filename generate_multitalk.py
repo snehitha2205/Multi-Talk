@@ -415,7 +415,7 @@ def process_tts_triple(text, save_dir, voice1, voice2, voice3):
     s2_sentences = []
     s3_sentences = []
 
-    pipeline = KPipeline(lang_code='a', repo_id='/content/multitalk-wts-run/Kokoro-82M')
+    pipeline = KPipeline(lang_code='a', repo_id='/content/drive/MyDrive/weights/Kokoro-82M')
     
     for idx, (speaker, content) in enumerate(matches):
         if speaker == '1':
