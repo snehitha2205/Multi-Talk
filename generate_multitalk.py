@@ -265,26 +265,6 @@ def loudness_norm(audio_array, sr=16000, lufs=-23):
     normalized_audio = pyln.normalize.loudness(audio_array, loudness, lufs)
     return normalized_audio
 
-def audio_prepare_multi(left_path, right_path, audio_type, sample_rate=16000):
-
-    if not (left_path=='None' or right_path=='None'):
-        human_speech_array1 = audio_prepare_single(left_path)
-        human_speech_array2 = audio_prepare_single(right_path)
-    elif left_path=='None':
-        human_speech_array2 = audio_prepare_single(right_path)
-        human_speech_array1 = np.zeros(human_speech_array2.shape[0])
-    elif right_path=='None':
-        human_speech_array1 = audio_prepare_single(left_path)
-        human_speech_array2 = np.zeros(human_speech_array1.shape[0])
-
-    if audio_type=='para':
-        new_human_speech1 = human_speech_array1
-        new_human_speech2 = human_speech_array2
-    elif audio_type=='add':
-        new_human_speech1 = np.concatenate([human_speech_array1[: human_speech_array1.shape[0]], np.zeros(human_speech_array2.shape[0])]) 
-        new_human_speech2 = np.concatenate([np.zeros(human_speech_array1.shape[0]), human_speech_array2[:human_speech_array2.shape[0]]])
-    sum_human_speechs = new_human_speech1 + new_human_speech2
-    return new_human_speech1, new_human_speech2, sum_human_speechs
 
 def _init_logging(rank):
     # logging
@@ -427,6 +407,79 @@ def process_tts_multi(text, save_dir, voice1, voice2):
     # sum, _ = librosa.load(save_path_sum, sr=16000)
     return s1, s2, save_path_sum
 
+def process_tts_triple(text, save_dir, voice1, voice2, voice3):
+    pattern = r'\(s(\d+)\)\s*(.*?)(?=\s*\(s\d+\)|$)'
+    matches = re.findall(pattern, text, re.DOTALL)
+    
+    s1_sentences = []
+    s2_sentences = []
+    s3_sentences = []
+
+    pipeline = KPipeline(lang_code='a', repo_id='/content/multitalk-wts-run/Kokoro-82M')
+    
+    for idx, (speaker, content) in enumerate(matches):
+        if speaker == '1':
+            voice_tensor = torch.load(voice1, weights_only=True)
+            generator = pipeline(
+                content, voice=voice_tensor,
+                speed=1, split_pattern=r'\n+'
+            )
+            audios = []
+            for i, (gs, ps, audio) in enumerate(generator):
+                audios.append(audio)
+            audios = torch.concat(audios, dim=0)
+            s1_sentences.append(audios)
+            s2_sentences.append(torch.zeros_like(audios))
+            s3_sentences.append(torch.zeros_like(audios))
+        elif speaker == '2':
+            voice_tensor = torch.load(voice2, weights_only=True)
+            generator = pipeline(
+                content, voice=voice_tensor,
+                speed=1, split_pattern=r'\n+'
+            )
+            audios = []
+            for i, (gs, ps, audio) in enumerate(generator):
+                audios.append(audio)
+            audios = torch.concat(audios, dim=0)
+            s2_sentences.append(audios)
+            s1_sentences.append(torch.zeros_like(audios))
+            s3_sentences.append(torch.zeros_like(audios))
+        elif speaker == '3':
+            voice_tensor = torch.load(voice3, weights_only=True)
+            generator = pipeline(
+                content, voice=voice_tensor,
+                speed=1, split_pattern=r'\n+'
+            )
+            audios = []
+            for i, (gs, ps, audio) in enumerate(generator):
+                audios.append(audio)
+            audios = torch.concat(audios, dim=0)
+            s3_sentences.append(audios)
+            s1_sentences.append(torch.zeros_like(audios))
+            s2_sentences.append(torch.zeros_like(audios))
+    
+    s1_sentences = torch.concat(s1_sentences, dim=0)
+    s2_sentences = torch.concat(s2_sentences, dim=0)
+    s3_sentences = torch.concat(s3_sentences, dim=0)
+    sum_sentences = s1_sentences + s2_sentences + s3_sentences
+    
+    save_path1 = f'{save_dir}/s1.wav'
+    save_path2 = f'{save_dir}/s2.wav'
+    save_path3 = f'{save_dir}/s3.wav'
+    save_path_sum = f'{save_dir}/sum.wav'
+    
+    sf.write(save_path1, s1_sentences, 24000)
+    sf.write(save_path2, s2_sentences, 24000)
+    sf.write(save_path3, s3_sentences, 24000)
+    sf.write(save_path_sum, sum_sentences, 24000)
+
+    s1, _ = librosa.load(save_path1, sr=16000)
+    s2, _ = librosa.load(save_path2, sr=16000)
+    s3, _ = librosa.load(save_path3, sr=16000)
+    
+    return s1, s2, s3, save_path_sum
+
+
 def generate(args):
     rank = int(os.getenv("RANK", 0))
     world_size = int(os.getenv("WORLD_SIZE", 1))
@@ -563,24 +616,49 @@ def generate(args):
                 sf.write(sum_audio_path, sum_audio, 16000)
                 input_data['video_audio'] = sum_audio_path
         elif args.audio_mode=='tts':
-            if 'human2_voice' not in input_data['tts_audio'].keys():
-                new_human_speech1, sum_audio = process_tts_single(input_data['tts_audio']['text'], args.audio_save_dir, input_data['tts_audio']['human1_voice'])
-                audio_embedding_1 = get_embedding(new_human_speech1, wav2vec_feature_extractor, audio_encoder)
-                emb1_path = os.path.join(args.audio_save_dir, '1.pt')
-                torch.save(audio_embedding_1, emb1_path)
-                input_data['cond_audio']['person1'] = emb1_path
-                input_data['video_audio'] = sum_audio
-            else:
-                new_human_speech1, new_human_speech2, sum_audio = process_tts_multi(input_data['tts_audio']['text'], args.audio_save_dir, input_data['tts_audio']['human1_voice'], input_data['tts_audio']['human2_voice'])
-                audio_embedding_1 = get_embedding(new_human_speech1, wav2vec_feature_extractor, audio_encoder)
-                audio_embedding_2 = get_embedding(new_human_speech2, wav2vec_feature_extractor, audio_encoder)
-                emb1_path = os.path.join(args.audio_save_dir, '1.pt')
-                emb2_path = os.path.join(args.audio_save_dir, '2.pt')
-                torch.save(audio_embedding_1, emb1_path)
-                torch.save(audio_embedding_2, emb2_path)
-                input_data['cond_audio']['person1'] = emb1_path
-                input_data['cond_audio']['person2'] = emb2_path
-                input_data['video_audio'] = sum_audio
+                    if 'human2_voice' not in input_data['tts_audio'].keys():
+                        # Single speaker TTS
+                        new_human_speech1, sum_audio = process_tts_single(input_data['tts_audio']['text'], args.audio_save_dir, input_data['tts_audio']['human1_voice'])
+                        audio_embedding_1 = get_embedding(new_human_speech1, wav2vec_feature_extractor, audio_encoder)
+                        emb1_path = os.path.join(args.audio_save_dir, '1.pt')
+                        torch.save(audio_embedding_1, emb1_path)
+                        input_data['cond_audio']['person1'] = emb1_path
+                        input_data['video_audio'] = sum_audio
+                    elif 'human3_voice' in input_data['tts_audio'].keys() and input_data['tts_audio']['human3_voice']:
+                        # Three speaker TTS
+                        new_human_speech1, new_human_speech2, new_human_speech3, sum_audio = process_tts_triple(
+                            input_data['tts_audio']['text'], 
+                            args.audio_save_dir, 
+                            input_data['tts_audio']['human1_voice'], 
+                            input_data['tts_audio']['human2_voice'],
+                            input_data['tts_audio']['human3_voice']
+                        )
+                        audio_embedding_1 = get_embedding(new_human_speech1, wav2vec_feature_extractor, audio_encoder)
+                        audio_embedding_2 = get_embedding(new_human_speech2, wav2vec_feature_extractor, audio_encoder)
+                        audio_embedding_3 = get_embedding(new_human_speech3, wav2vec_feature_extractor, audio_encoder)
+                        emb1_path = os.path.join(args.audio_save_dir, '1.pt')
+                        emb2_path = os.path.join(args.audio_save_dir, '2.pt')
+                        emb3_path = os.path.join(args.audio_save_dir, '3.pt')
+                        torch.save(audio_embedding_1, emb1_path)
+                        torch.save(audio_embedding_2, emb2_path)
+                        torch.save(audio_embedding_3, emb3_path)
+                        input_data['cond_audio']['person1'] = emb1_path
+                        input_data['cond_audio']['person2'] = emb2_path
+                        input_data['cond_audio']['person3'] = emb3_path
+                        input_data['video_audio'] = sum_audio
+                    else:
+                        # Two speaker TTS
+                        new_human_speech1, new_human_speech2, sum_audio = process_tts_multi(input_data['tts_audio']['text'], args.audio_save_dir, input_data['tts_audio']['human1_voice'], input_data['tts_audio']['human2_voice'])
+                        audio_embedding_1 = get_embedding(new_human_speech1, wav2vec_feature_extractor, audio_encoder)
+                        audio_embedding_2 = get_embedding(new_human_speech2, wav2vec_feature_extractor, audio_encoder)
+                        emb1_path = os.path.join(args.audio_save_dir, '1.pt')
+                        emb2_path = os.path.join(args.audio_save_dir, '2.pt')
+                        torch.save(audio_embedding_1, emb1_path)
+                        torch.save(audio_embedding_2, emb2_path)
+                        input_data['cond_audio']['person1'] = emb1_path
+                        input_data['cond_audio']['person2'] = emb2_path
+                        input_data['video_audio'] = sum_audio
+
 
 
     logging.info("Creating MultiTalk pipeline.")
