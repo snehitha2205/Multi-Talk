@@ -338,7 +338,7 @@ def audio_prepare_single(audio_path, sample_rate=16000):
 def process_tts_single(text, save_dir, voice1):    
     s1_sentences = []
 
-    pipeline = KPipeline(lang_code='a', repo_id='/content/multitalk-wts-run/Kokoro-82M')
+    pipeline = KPipeline(lang_code='a', repo_id='/content/drive/MyDrive/weights/Kokoro-82M')
 
     voice_tensor = torch.load(voice1, weights_only=True)
     generator = pipeline(
