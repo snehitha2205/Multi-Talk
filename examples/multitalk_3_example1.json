@@ -4,9 +4,9 @@
     "audio_type": "para",
     "tts_audio": {
         "text": "(s1) Ugh, I'm so bored. (s2) Seriously! Nothing to do. (s3) Mall? (s1) Again? (s2) Park? (s3) Sounds better! (s1) Let's go!",
-        "human1_voice": "weights/Kokoro-82M/voices/af_heart.pt",
-        "human2_voice": "weights/Kokoro-82M/voices/af_heather.pt",
-        "human3_voice": "weights/Kokoro-82M/voices/af_jenny.pt"
+        "human1_voice": "/content/drive/MyDrive/weights/Kokoro-82M/voices/af_heart.pt",
+        "human2_voice": "/content/drive/MyDrive/weights/Kokoro-82M/voices/af_alloy.pt",
+        "human3_voice": "/content/drive/MyDrive/weights/Kokoro-82M/voices/af_bella.pt"
     },
     "cond_audio":{}
 }

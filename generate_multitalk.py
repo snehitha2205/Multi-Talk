@@ -365,7 +365,7 @@ def process_tts_multi(text, save_dir, voice1, voice2):
     s1_sentences = []
     s2_sentences = []
 
-    pipeline = KPipeline(lang_code='a', repo_id='weights/Kokoro-82M')
+    pipeline = KPipeline(lang_code='a', repo_id='/content/drive/MyDrive/weights/Kokoro-82M')
     for idx, (speaker, content) in enumerate(matches):
         if speaker == '1':
             voice_tensor = torch.load(voice1, weights_only=True)
