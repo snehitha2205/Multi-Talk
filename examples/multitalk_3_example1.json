@@ -4,9 +4,9 @@
   "audio_type": "para",
   "tts_audio": {
     "text": "(s1) Thank you for inviting me to the discussion. (s2) It’s our pleasure to have you here today. (s3) I’m glad to be part of this conversation as well. (s2) Today we’ll focus on professional growth and innovation. (s1) That’s an important topic in today’s world. (s3) Indeed, adapting to change is essential for success.",
-    "human1_voice": "/content/Multi-Talk/weights/Kokoro-82M/.cache/kokoro/af_sara.pt",
-    "human2_voice": "/content/Multi-Talk/weights/Kokoro-82M/.cache/kokoro/am_michael.pt",
-    "human3_voice": "/content/Multi-Talk/weights/Kokoro-82M/.cache/kokoro/af_nova.pt"
+    "human1_voice": "/content/drive/MyDrive/weights/Kokoro-82M/voices/af_sara.pt",
+    "human2_voice": "/content/drive/MyDrive/weights/Kokoro-82M/voices/am_michael.pt",
+    "human3_voice": "/content/drive/MyDrive/weights/Kokoro-82M/voices/af_nova.pt"
   },
   "cond_audio": {}
 }
