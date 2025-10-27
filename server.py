@@ -7,6 +7,7 @@ import warnings
 from datetime import datetime
 from flask import Flask, request, jsonify, send_file
 import uuid
+import glob
 
 warnings.filterwarnings('ignore')
 
@@ -34,11 +35,11 @@ import re
 
 app = Flask(__name__)
 
-# Configuration - you can set these as environment variables or modify directly
+# Configuration - USING YOUR PATHS FROM CLI
 CONFIG = {
-    "ckpt_dir": None,  # Set your checkpoint directory
-    "quant_dir": None,  # Set your quant directory
-    "wav2vec_dir": None,  # Set your wav2vec directory
+    "ckpt_dir": "/content/drive/MyDrive/weights/Wan2.1-I2V-14B-480P",
+    "quant_dir": "/content/drive/MyDrive/weights/MeiGen-MultiTalk", 
+    "wav2vec_dir": "/content/drive/MyDrive/weights/chinese-wav2vec2-base",
     "task": "multitalk-14B",
     "size": "multitalk-480",
     "frame_num": 81,
@@ -53,28 +54,35 @@ CONFIG = {
     "audio_save_dir": "save_audio",
     "base_seed": 42,
     "motion_frame": 25,
-    "mode": "clip",
-    "sample_steps": None,
+    "mode": "streaming",
+    "sample_steps": 40,
     "sample_shift": None,
     "sample_text_guide_scale": 5.0,
     "sample_audio_guide_scale": 4.0,
     "num_persistent_param_in_dit": None,
-    "audio_mode": "localfile",
     "use_teacache": False,
     "teacache_thresh": 0.2,
     "use_apg": False,
     "apg_momentum": -0.75,
     "apg_norm_threshold": 55,
     "color_correction_strength": 1.0,
-    "quant": None
+    "quant": "int8",
+    "device": "cuda" if torch.cuda.is_available() else "cpu"
 }
 
-def _validate_config(config):
-    # Basic check
-    assert config["ckpt_dir"] is not None, "Please specify the checkpoint directory."
-    assert config["task"] in WAN_CONFIGS, f"Unsupport task: {config['task']}"
+# Global variables for pre-loaded models
+wan_pipeline = None
+wav2vec_feature_extractor = None
+audio_encoder = None
+pipeline_initialized = False
 
-    # The default sampling steps are 40 for image-to-video tasks and 50 for text-to-video tasks.
+def _validate_config(config):
+    """Validate configuration matching CLI _validate_args functionality"""
+    if config["ckpt_dir"] is None:
+        raise ValueError("Please specify the checkpoint directory.")
+    if config["task"] not in WAN_CONFIGS:
+        raise ValueError(f"Unsupport task: {config['task']}")
+
     if config["sample_steps"] is None:
         config["sample_steps"] = 40
 
@@ -88,8 +96,8 @@ def _validate_config(config):
 
     config["base_seed"] = config["base_seed"] if config["base_seed"] >= 0 else random.randint(0, 99999999)
     
-    # Size check
-    assert config["size"] in SUPPORTED_SIZES[config["task"]], f"Unsupport size {config['size']} for task {config['task']}, supported sizes are: {', '.join(SUPPORTED_SIZES[config['task']])}"
+    if config["size"] not in SUPPORTED_SIZES[config["task"]]:
+        raise ValueError(f"Unsupport size {config['size']} for task {config['task']}, supported sizes are: {', '.join(SUPPORTED_SIZES[config['task']])}")
 
 def custom_init(device, wav2vec):    
     audio_encoder = Wav2Vec2Model.from_pretrained(wav2vec, local_files_only=True).to(device)
@@ -105,29 +113,16 @@ def loudness_norm(audio_array, sr=16000, lufs=-23):
     normalized_audio = pyln.normalize.loudness(audio_array, loudness, lufs)
     return normalized_audio
 
-def _init_logging(rank):
-    # logging
-    if rank == 0:
-        # set format
-        logging.basicConfig(
-            level=logging.INFO,
-            format="[%(asctime)s] %(levelname)s: %(message)s",
-            handlers=[logging.StreamHandler(stream=sys.stdout)])
-    else:
-        logging.basicConfig(level=logging.ERROR)
-
 def get_embedding(speech_array, wav2vec_feature_extractor, audio_encoder, sr=16000, device='cpu'):
     audio_duration = len(speech_array) / sr
-    video_length = audio_duration * 25 # Assume the video fps is 25
+    video_length = audio_duration * 25
 
-    # wav2vec_feature_extractor
     audio_feature = np.squeeze(
         wav2vec_feature_extractor(speech_array, sampling_rate=sr).input_values
     )
     audio_feature = torch.from_numpy(audio_feature).float().to(device=device)
     audio_feature = audio_feature.unsqueeze(0)
 
-    # audio encoder
     with torch.no_grad():
         embeddings = audio_encoder(audio_feature, seq_len=int(video_length), output_hidden_states=True)
 
@@ -137,7 +132,6 @@ def get_embedding(speech_array, wav2vec_feature_extractor, audio_encoder, sr=160
 
     audio_emb = torch.stack(embeddings.hidden_states[1:], dim=1).squeeze(0)
     audio_emb = rearrange(audio_emb, "b s d -> s b d")
-
     audio_emb = audio_emb.cpu().detach()
     return audio_emb
 
@@ -161,7 +155,6 @@ def extract_audio_from_video(filename, sample_rate):
     human_speech_array, sr = librosa.load(raw_audio_path, sr=sample_rate)
     human_speech_array = loudness_norm(human_speech_array, sr)
     os.remove(raw_audio_path)
-
     return human_speech_array
 
 def audio_prepare_single(audio_path, sample_rate=16000):
@@ -176,12 +169,11 @@ def audio_prepare_single(audio_path, sample_rate=16000):
 
 def process_tts_single(text, save_dir, voice1):    
     s1_sentences = []
-
     pipeline = KPipeline(lang_code='a', repo_id='/content/drive/MyDrive/weights/Kokoro-82M')
 
     voice_tensor = torch.load(voice1, weights_only=True)
     generator = pipeline(
-        text, voice=voice_tensor, # <= change voice here
+        text, voice=voice_tensor,
         speed=1, split_pattern=r'\n+'
     )
     audios = []
@@ -190,8 +182,8 @@ def process_tts_single(text, save_dir, voice1):
     audios = torch.concat(audios, dim=0)
     s1_sentences.append(audios)
     s1_sentences = torch.concat(s1_sentences, dim=0)
-    save_path1 =f'{save_dir}/s1.wav'
-    sf.write(save_path1, s1_sentences, 24000) # save each audio file
+    save_path1 = f'{save_dir}/s1.wav'
+    sf.write(save_path1, s1_sentences, 24000)
     s1, _ = librosa.load(save_path1, sr=16000)
     return s1, save_path1
 
@@ -207,7 +199,7 @@ def process_tts_multi(text, save_dir, voice1, voice2):
         if speaker == '1':
             voice_tensor = torch.load(voice1, weights_only=True)
             generator = pipeline(
-                content, voice=voice_tensor, # <= change voice here
+                content, voice=voice_tensor,
                 speed=1, split_pattern=r'\n+'
             )
             audios = []
@@ -219,7 +211,7 @@ def process_tts_multi(text, save_dir, voice1, voice2):
         elif speaker == '2':
             voice_tensor = torch.load(voice2, weights_only=True)
             generator = pipeline(
-                content, voice=voice_tensor, # <= change voice here
+                content, voice=voice_tensor,
                 speed=1, split_pattern=r'\n+'
             )
             audios = []
@@ -232,16 +224,15 @@ def process_tts_multi(text, save_dir, voice1, voice2):
     s1_sentences = torch.concat(s1_sentences, dim=0)
     s2_sentences = torch.concat(s2_sentences, dim=0)
     sum_sentences = s1_sentences + s2_sentences
-    save_path1 =f'{save_dir}/s1.wav'
-    save_path2 =f'{save_dir}/s2.wav'
+    save_path1 = f'{save_dir}/s1.wav'
+    save_path2 = f'{save_dir}/s2.wav'
     save_path_sum = f'{save_dir}/sum.wav'
-    sf.write(save_path1, s1_sentences, 24000) # save each audio file
+    sf.write(save_path1, s1_sentences, 24000)
     sf.write(save_path2, s2_sentences, 24000)
     sf.write(save_path_sum, sum_sentences, 24000)
 
     s1, _ = librosa.load(save_path1, sr=16000)
     s2, _ = librosa.load(save_path2, sr=16000)
-    # sum, _ = librosa.load(save_path_sum, sr=16000)
     return s1, s2, save_path_sum
 
 def process_tts_triple(text, save_dir, voice1, voice2, voice3):
@@ -316,77 +307,107 @@ def process_tts_triple(text, save_dir, voice1, voice2, voice3):
     
     return s1, s2, s3, save_path_sum
 
-def generate_video(input_data, config, job_id):
-    rank = int(os.getenv("RANK", 0))
-    world_size = int(os.getenv("WORLD_SIZE", 1))
-    local_rank = int(os.getenv("LOCAL_RANK", 0))
-    device = local_rank
-    _init_logging(rank)
-
-    if config["offload_model"] is None:
-        config["offload_model"] = False if world_size > 1 else True
-        logging.info(f"offload_model is not specified, set to {config['offload_model']}.")
+def initialize_models(config):
+    """Initialize models once at server startup"""
+    global wan_pipeline, wav2vec_feature_extractor, audio_encoder, pipeline_initialized
     
-    if world_size > 1:
-        torch.cuda.set_device(local_rank)
-        dist.init_process_group(
-            backend="nccl",
-            init_method="env://",
-            rank=rank,
-            world_size=world_size)
-    else:
-        assert not (config["t5_fsdp"] or config["dit_fsdp"]), "t5_fsdp and dit_fsdp are not supported in non-distributed environments."
-        assert not (config["ulysses_size"] > 1 or config["ring_size"] > 1), "context parallel are not supported in non-distributed environments."
-
-    if config["ulysses_size"] > 1 or config["ring_size"] > 1:
-        assert config["ulysses_size"] * config["ring_size"] == world_size, "The number of ulysses_size and ring_size should be equal to the world size."
-        from xfuser.core.distributed import (
-            init_distributed_environment,
-            initialize_model_parallel,
+    if pipeline_initialized:
+        return True
+        
+    try:
+        logging.info("Initializing models...")
+        
+        # Set device - use GPU if available
+        device = torch.device(config["device"])
+        if device.type == 'cuda':
+            torch.cuda.set_device(0)
+        
+        # Set environment variables for single GPU operation
+        os.environ["RANK"] = "0"
+        os.environ["WORLD_SIZE"] = "1"
+        os.environ["LOCAL_RANK"] = "0"
+        os.environ["MASTER_ADDR"] = "localhost"
+        os.environ["MASTER_PORT"] = "12355"
+        
+        # Initialize distributed process group for single GPU
+        if not dist.is_initialized():
+            dist.init_process_group(
+                backend="nccl",
+                init_method="env://",
+                rank=0,
+                world_size=1
+            )
+        
+        # Initialize Wav2Vec models on correct device
+        logging.info("Loading Wav2Vec models...")
+        wav2vec_feature_extractor, audio_encoder = custom_init(device, config["wav2vec_dir"])
+        
+        # Load Wan pipeline configuration
+        cfg = WAN_CONFIGS[config["task"]]
+        
+        # Set offload_model if None (same logic as original)
+        if config["offload_model"] is None:
+            config["offload_model"] = False  # Single GPU, no offloading needed
+            logging.info(f"offload_model is not specified, set to {config['offload_model']}.")
+        
+        logging.info(f"Creating MultiTalk pipeline for task: {config['task']}")
+        wan_pipeline = wan.MultiTalkPipeline(
+            config=cfg,
+            checkpoint_dir=config["ckpt_dir"],
+            quant_dir=config["quant_dir"],
+            device_id=0 if device.type == 'cuda' else -1,
+            rank=0,
+            t5_fsdp=config["t5_fsdp"],
+            dit_fsdp=config["dit_fsdp"], 
+            use_usp=False,  
+            t5_cpu=config["t5_cpu"],
+            lora_dir=config["lora_dir"],
+            lora_scales=config["lora_scale"],
+            quant=config["quant"]
         )
-        init_distributed_environment(
-            rank=dist.get_rank(), world_size=dist.get_world_size())
 
-        initialize_model_parallel(
-            sequence_parallel_degree=dist.get_world_size(),
-            ring_degree=config["ring_size"],
-            ulysses_degree=config["ulysses_size"],
-        )
+        if config["num_persistent_param_in_dit"] is not None:
+            wan_pipeline.vram_management = True
+            wan_pipeline.enable_vram_management(
+                num_persistent_param_in_dit=config["num_persistent_param_in_dit"]
+            )
+        
+        pipeline_initialized = True
+        logging.info("All models initialized successfully!")
+        return True
+        
+    except Exception as e:
+        logging.error(f"Failed to initialize models: {str(e)}")
+        return False
 
-    cfg = WAN_CONFIGS[config["task"]]
-    if config["ulysses_size"] > 1:
-        assert cfg.num_heads % config["ulysses_size"] == 0, f"{cfg.num_heads=} cannot be divided evenly by {config['ulysses_size']=}."
-
-    logging.info(f"Generation job config: {config}")
-    logging.info(f"Generation model config: {cfg}")
-
-    if dist.is_initialized():
-        base_seed = [config["base_seed"]] if rank == 0 else [None]
-        dist.broadcast_object_list(base_seed, src=0)
-        config["base_seed"] = base_seed[0]
-
-    if config["task"] not in ["multitalk-14B", "t2v-1.3B"]:
-        raise ValueError(f"Unsupported task: {config['task']}")
-
-    # Process audio data
-    wav2vec_feature_extractor, audio_encoder = custom_init('cpu', config["wav2vec_dir"])
-    config["audio_save_dir"] = os.path.join(config["audio_save_dir"], job_id)
-    os.makedirs(config["audio_save_dir"], exist_ok=True)
+def generate_video_with_audio_files(input_data, config, job_id):
+    """Generate video using local audio files"""
+    global wan_pipeline, wav2vec_feature_extractor, audio_encoder
     
-    if config["audio_mode"] == 'localfile':
+    if not pipeline_initialized:
+        raise RuntimeError("Models not initialized. Please restart the server.")
+    
+    try:
+        # Process audio data from local files
+        audio_save_dir = os.path.join(config["audio_save_dir"], job_id)
+        os.makedirs(audio_save_dir, exist_ok=True)
+        
+        # Audio processing for local files
         num_speakers = len(input_data['cond_audio'])
         all_audio_arrays = []
         all_embeddings = []
         all_audio_paths = []
 
+        device = torch.device(config["device"])
+        
         for i in range(num_speakers):
             key = f'person{i+1}'
             audio_path = input_data['cond_audio'].get(key)
             if audio_path is not None:
                 speech = audio_prepare_single(audio_path)
                 all_audio_arrays.append(speech)
-                emb = get_embedding(speech, wav2vec_feature_extractor, audio_encoder)
-                emb_path = os.path.join(config["audio_save_dir"], f'{i+1}.pt')
+                emb = get_embedding(speech, wav2vec_feature_extractor, audio_encoder, device=device)
+                emb_path = os.path.join(audio_save_dir, f'{i+1}.pt')
                 torch.save(emb, emb_path)
                 input_data['cond_audio'][key] = emb_path
                 all_embeddings.append(emb)
@@ -396,33 +417,86 @@ def generate_video(input_data, config, job_id):
             max_len = max([len(a) for a in all_audio_arrays])
             padded = [np.pad(a, (0, max_len - len(a))) for a in all_audio_arrays]
             sum_audio = np.sum(padded, axis=0)
-            sum_audio_path = os.path.join(config["audio_save_dir"], 'sum.wav')
+            sum_audio_path = os.path.join(audio_save_dir, 'sum.wav')
             sf.write(sum_audio_path, sum_audio, 16000)
             input_data['video_audio'] = sum_audio_path
-    elif config["audio_mode"] == 'tts':
+
+        # Generate video using pre-loaded pipeline
+        logging.info("Generating video with local audio files...")
+        video = wan_pipeline.generate(
+            input_data,
+            size_buckget=config["size"],
+            motion_frame=config["motion_frame"],
+            frame_num=config["frame_num"],
+            shift=config["sample_shift"],
+            sampling_steps=config["sample_steps"],
+            text_guide_scale=config["sample_text_guide_scale"],
+            audio_guide_scale=config["sample_audio_guide_scale"],
+            seed=config["base_seed"],
+            offload_model=config["offload_model"],
+            max_frames_num=config["frame_num"] if config["mode"] == 'clip' else 1000,
+            color_correction_strength=config["color_correction_strength"],
+            extra_args=config,
+        )
+
+        # Save video file
+        formatted_time = datetime.now().strftime("%Y%m%d_%H%M%S")
+        formatted_prompt = input_data['prompt'].replace(" ", "_").replace("/", "_")[:50]
+        save_file = f"{config['task']}_{config['size']}_{formatted_prompt}_{formatted_time}"
+        
+        output_path = f"{save_file}.mp4"
+        logging.info(f"Saving generated video to {output_path}")
+        save_video_ffmpeg(video, save_file, [input_data['video_audio']], high_quality_save=False)
+        
+        return output_path
+        
+    except Exception as e:
+        logging.error(f"Video generation with local audio failed: {str(e)}")
+        raise
+
+def generate_video_with_tts(input_data, config, job_id):
+    """Generate video using TTS"""
+    global wan_pipeline, wav2vec_feature_extractor, audio_encoder
+    
+    if not pipeline_initialized:
+        raise RuntimeError("Models not initialized. Please restart the server.")
+    
+    try:
+        # Process TTS data
+        audio_save_dir = os.path.join(config["audio_save_dir"], job_id)
+        os.makedirs(audio_save_dir, exist_ok=True)
+        
+        device = torch.device(config["device"])
+        
+        # TTS processing
         if 'human2_voice' not in input_data['tts_audio'].keys():
             # Single speaker TTS
-            new_human_speech1, sum_audio = process_tts_single(input_data['tts_audio']['text'], config["audio_save_dir"], input_data['tts_audio']['human1_voice'])
-            audio_embedding_1 = get_embedding(new_human_speech1, wav2vec_feature_extractor, audio_encoder)
-            emb1_path = os.path.join(config["audio_save_dir"], '1.pt')
+            new_human_speech1, sum_audio = process_tts_single(
+                input_data['tts_audio']['text'], 
+                audio_save_dir, 
+                input_data['tts_audio']['human1_voice']
+            )
+            audio_embedding_1 = get_embedding(new_human_speech1, wav2vec_feature_extractor, audio_encoder, device=device)
+            emb1_path = os.path.join(audio_save_dir, '1.pt')
             torch.save(audio_embedding_1, emb1_path)
             input_data['cond_audio']['person1'] = emb1_path
             input_data['video_audio'] = sum_audio
+            
         elif 'human3_voice' in input_data['tts_audio'].keys() and input_data['tts_audio']['human3_voice']:
             # Three speaker TTS
             new_human_speech1, new_human_speech2, new_human_speech3, sum_audio = process_tts_triple(
                 input_data['tts_audio']['text'], 
-                config["audio_save_dir"], 
+                audio_save_dir, 
                 input_data['tts_audio']['human1_voice'], 
                 input_data['tts_audio']['human2_voice'],
                 input_data['tts_audio']['human3_voice']
             )
-            audio_embedding_1 = get_embedding(new_human_speech1, wav2vec_feature_extractor, audio_encoder)
-            audio_embedding_2 = get_embedding(new_human_speech2, wav2vec_feature_extractor, audio_encoder)
-            audio_embedding_3 = get_embedding(new_human_speech3, wav2vec_feature_extractor, audio_encoder)
-            emb1_path = os.path.join(config["audio_save_dir"], '1.pt')
-            emb2_path = os.path.join(config["audio_save_dir"], '2.pt')
-            emb3_path = os.path.join(config["audio_save_dir"], '3.pt')
+            audio_embedding_1 = get_embedding(new_human_speech1, wav2vec_feature_extractor, audio_encoder, device=device)
+            audio_embedding_2 = get_embedding(new_human_speech2, wav2vec_feature_extractor, audio_encoder, device=device)
+            audio_embedding_3 = get_embedding(new_human_speech3, wav2vec_feature_extractor, audio_encoder, device=device)
+            emb1_path = os.path.join(audio_save_dir, '1.pt')
+            emb2_path = os.path.join(audio_save_dir, '2.pt')
+            emb3_path = os.path.join(audio_save_dir, '3.pt')
             torch.save(audio_embedding_1, emb1_path)
             torch.save(audio_embedding_2, emb2_path)
             torch.save(audio_embedding_3, emb3_path)
@@ -432,148 +506,195 @@ def generate_video(input_data, config, job_id):
             input_data['video_audio'] = sum_audio
         else:
             # Two speaker TTS
-            new_human_speech1, new_human_speech2, sum_audio = process_tts_multi(input_data['tts_audio']['text'], config["audio_save_dir"], input_data['tts_audio']['human1_voice'], input_data['tts_audio']['human2_voice'])
-            audio_embedding_1 = get_embedding(new_human_speech1, wav2vec_feature_extractor, audio_encoder)
-            audio_embedding_2 = get_embedding(new_human_speech2, wav2vec_feature_extractor, audio_encoder)
-            emb1_path = os.path.join(config["audio_save_dir"], '1.pt')
-            emb2_path = os.path.join(config["audio_save_dir"], '2.pt')
+            new_human_speech1, new_human_speech2, sum_audio = process_tts_multi(
+                input_data['tts_audio']['text'], 
+                audio_save_dir, 
+                input_data['tts_audio']['human1_voice'], 
+                input_data['tts_audio']['human2_voice']
+            )
+            audio_embedding_1 = get_embedding(new_human_speech1, wav2vec_feature_extractor, audio_encoder, device=device)
+            audio_embedding_2 = get_embedding(new_human_speech2, wav2vec_feature_extractor, audio_encoder, device=device)
+            emb1_path = os.path.join(audio_save_dir, '1.pt')
+            emb2_path = os.path.join(audio_save_dir, '2.pt')
             torch.save(audio_embedding_1, emb1_path)
             torch.save(audio_embedding_2, emb2_path)
             input_data['cond_audio']['person1'] = emb1_path
             input_data['cond_audio']['person2'] = emb2_path
             input_data['video_audio'] = sum_audio
 
-    logging.info("Creating MultiTalk pipeline.")
-    wan_i2v = wan.MultiTalkPipeline(
-        config=cfg,
-        checkpoint_dir=config["ckpt_dir"],
-        quant_dir=config["quant_dir"],
-        device_id=device,
-        rank=rank,
-        t5_fsdp=config["t5_fsdp"],
-        dit_fsdp=config["dit_fsdp"], 
-        use_usp=(config["ulysses_size"] > 1 or config["ring_size"] > 1),  
-        t5_cpu=config["t5_cpu"],
-        lora_dir=config["lora_dir"],
-        lora_scales=config["lora_scale"],
-        quant=config["quant"]
-    )
-
-    if config["num_persistent_param_in_dit"] is not None:
-        wan_i2v.vram_management = True
-        wan_i2v.enable_vram_management(
-            num_persistent_param_in_dit=config["num_persistent_param_in_dit"]
+        # Generate video using pre-loaded pipeline
+        logging.info("Generating video with TTS...")
+        video = wan_pipeline.generate(
+            input_data,
+            size_buckget=config["size"],
+            motion_frame=config["motion_frame"],
+            frame_num=config["frame_num"],
+            shift=config["sample_shift"],
+            sampling_steps=config["sample_steps"],
+            text_guide_scale=config["sample_text_guide_scale"],
+            audio_guide_scale=config["sample_audio_guide_scale"],
+            seed=config["base_seed"],
+            offload_model=config["offload_model"],
+            max_frames_num=config["frame_num"] if config["mode"] == 'clip' else 1000,
+            color_correction_strength=config["color_correction_strength"],
+            extra_args=config,
         )
-    
-    logging.info("Generating video ...")
-    video = wan_i2v.generate(
-        input_data,
-        size_buckget=config["size"],
-        motion_frame=config["motion_frame"],
-        frame_num=config["frame_num"],
-        shift=config["sample_shift"],
-        sampling_steps=config["sample_steps"],
-        text_guide_scale=config["sample_text_guide_scale"],
-        audio_guide_scale=config["sample_audio_guide_scale"],
-        seed=config["base_seed"],
-        offload_model=config["offload_model"],
-        max_frames_num=config["frame_num"] if config["mode"] == 'clip' else 1000,
-        color_correction_strength=config["color_correction_strength"],
-        extra_args=config,
-    )
 
-    if rank == 0:
-        save_file = f"output_{job_id}"
+        # Save video file
+        formatted_time = datetime.now().strftime("%Y%m%d_%H%M%S")
+        formatted_prompt = input_data['prompt'].replace(" ", "_").replace("/", "_")[:50]
+        save_file = f"{config['task']}_{config['size']}_{formatted_prompt}_{formatted_time}"
         
-        if config.get("save_file") is None:
-            formatted_time = datetime.now().strftime("%Y%m%d_%H%M%S")
-            formatted_prompt = input_data['prompt'].replace(" ", "_").replace("/", "_")[:50]
-            save_file = f"{config['task']}{config['size'].replace('*','x') if sys.platform=='win32' else config['size']}{config['ulysses_size']}{config['ring_size']}{formatted_prompt}_{formatted_time}"
-        else:
-            save_file = config["save_file"]
-        
-        logging.info(f"Saving generated video to {save_file}.mp4")
+        output_path = f"{save_file}.mp4"
+        logging.info(f"Saving generated video to {output_path}")
         save_video_ffmpeg(video, save_file, [input_data['video_audio']], high_quality_save=False)
         
-        return f"{save_file}.mp4"
-    
-    logging.info("Finished.")
-    return None
+        return output_path
+        
+    except Exception as e:
+        logging.error(f"Video generation with TTS failed: {str(e)}")
+        raise
 
-@app.route('/generate', methods=['POST'])
-def generate_endpoint():
+@app.route('/generate/with-audio', methods=['POST'])
+def generate_with_audio_endpoint():
+    """Endpoint for generating video with local audio files"""
     try:
-        # Get JSON data from request
         input_data = request.get_json()
         
         if not input_data:
             return jsonify({"error": "No JSON data provided"}), 400
         
-        # Generate unique job ID
+        # Validate required fields for audio files
+        required_fields = ['prompt', 'cond_image', 'cond_audio']
+        for field in required_fields:
+            if field not in input_data:
+                return jsonify({"error": f"Missing required field: {field}"}), 400
+        
         job_id = str(uuid.uuid4())
+        logging.info(f"Starting video generation with local audio - Job: {job_id}")
         
-        # Validate configuration
-        _validate_config(CONFIG)
-        
-        # Generate video
-        output_file = generate_video(input_data, CONFIG, job_id)
+        # Generate video with local audio files
+        output_file = generate_video_with_audio_files(input_data, CONFIG, job_id)
         
         if output_file and os.path.exists(output_file):
             return jsonify({
                 "status": "success",
                 "job_id": job_id,
                 "output_file": output_file,
-                "download_url": f"/download/{job_id}"
+                "download_url": f"/download/{os.path.basename(output_file)}"
             }), 200
         else:
             return jsonify({
                 "status": "error",
-                "message": "Video generation failed"
+                "message": "Video generation failed - output file not created"
             }), 500
             
     except Exception as e:
-        logging.error(f"Error in video generation: {str(e)}")
+        logging.error(f"Error in video generation with audio: {str(e)}")
         return jsonify({
             "status": "error",
             "message": str(e)
         }), 500
 
-@app.route('/download/<job_id>', methods=['GET'])
-def download_video(job_id):
+@app.route('/generate/with-tts', methods=['POST'])
+def generate_with_tts_endpoint():
+    """Endpoint for generating video with TTS"""
     try:
-        # Look for the output file - you might need to adjust this logic based on your naming convention
-        possible_files = [
-            f"output_{job_id}.mp4",
-            f"{CONFIG['task']}*{job_id}*.mp4"
-        ]
+        input_data = request.get_json()
         
-        output_file = None
-        for file_pattern in possible_files:
-            import glob
-            matches = glob.glob(file_pattern)
-            if matches:
-                output_file = matches[0]
-                break
+        if not input_data:
+            return jsonify({"error": "No JSON data provided"}), 400
+        
+        # Validate required fields for TTS
+        required_fields = ['prompt', 'cond_image', 'tts_audio']
+        for field in required_fields:
+            if field not in input_data:
+                return jsonify({"error": f"Missing required field: {field}"}), 400
+        
+        job_id = str(uuid.uuid4())
+        logging.info(f"Starting video generation with TTS - Job: {job_id}")
+        
+        # Generate video with TTS
+        output_file = generate_video_with_tts(input_data, CONFIG, job_id)
         
         if output_file and os.path.exists(output_file):
-            return send_file(output_file, as_attachment=True)
+            return jsonify({
+                "status": "success",
+                "job_id": job_id,
+                "output_file": output_file,
+                "download_url": f"/download/{os.path.basename(output_file)}"
+            }), 200
         else:
-            return jsonify({"error": "File not found"}), 404
+            return jsonify({
+                "status": "error",
+                "message": "Video generation failed - output file not created"
+            }), 500
             
+    except Exception as e:
+        logging.error(f"Error in video generation with TTS: {str(e)}")
+        return jsonify({
+            "status": "error",
+            "message": str(e)
+        }), 500
+
+@app.route('/download/<filename>', methods=['GET'])
+def download_video(filename):
+    try:
+        if os.path.exists(filename):
+            return send_file(filename, as_attachment=True)
+        else:
+            matches = glob.glob(f"*{filename}*")
+            if matches:
+                return send_file(matches[0], as_attachment=True)
+            else:
+                return jsonify({"error": "File not found"}), 404
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
 @app.route('/health', methods=['GET'])
 def health_check():
-    return jsonify({"status": "healthy"}), 200
+    status = "healthy" if pipeline_initialized else "models_not_loaded"
+    return jsonify({
+        "status": status,
+        "models_initialized": pipeline_initialized
+    }), 200
+
+@app.route('/config', methods=['GET'])
+def get_config():
+    """Endpoint to get current configuration"""
+    return jsonify({
+        "config": CONFIG,
+        "models_initialized": pipeline_initialized
+    }), 200
+
+def cleanup():
+    """Cleanup function to properly shutdown distributed process group"""
+    if dist.is_initialized():
+        dist.destroy_process_group()
 
 if __name__ == "__main__":
-    # Validate configuration on startup
+    # Set up logging
+    logging.basicConfig(
+        level=logging.INFO,
+        format="[%(asctime)s] %(levelname)s: %(message)s",
+        handlers=[logging.StreamHandler(stream=sys.stdout)]
+    )
+    
+    # Validate configuration
     try:
         _validate_config(CONFIG)
-        print("Configuration validated successfully")
+        logging.info("Configuration validated successfully")
     except Exception as e:
-        print(f"Configuration error: {e}")
+        logging.error(f"Configuration error: {e}")
         sys.exit(1)
     
-    app.run(host='0.0.0.0', port=5000, debug=False)
+    # Initialize models at startup
+    if initialize_models(CONFIG):
+        logging.info("Flask server starting with pre-loaded models...")
+        try:
+            app.run(host='0.0.0.0', port=5000, debug=False, threaded=False)
+        finally:
+            cleanup()
+    else:
+        logging.error("Failed to initialize models. Server cannot start.")
+        sys.exit(1)
