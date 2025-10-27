@@ -1,12 +1,12 @@
 {
-    "prompt": "Three teenage girls are casually sitting at home, facing each other and talking. The girl on the left, with curly brown hair, wears a beige sweater and ripped jeans, gesturing with her hands as she speaks. The girl in the middle, with straight dark hair, is dressed in a light blue hoodie and dark pants, listening attentively. The girl on the right, with reddish-brown hair in a bun, has on a floral long-sleeve top and jeans, holding a mug. They are discussing going out because they are bored, with expressions that suggest a mix of restlessness and excitement. The setting is a cozy living room with a large window in the background, offering natural light. A coffee table in front of them holds a bowl of popcorn and other items, indicating a relaxed atmosphere. The shot captures their upper bodies, highlighting their facial expressions and interactions.",
-    "cond_image": "examples/multi/4/multi1.jpg",
-    "audio_type": "para",
-    "tts_audio": {
-        "text": "(s1) Ugh, I'm so bored. (s2) Seriously! Nothing to do. (s3) Mall? (s1) Again? (s2) Park? (s3) Sounds better! (s1) Let's go!",
-        "human1_voice": "/content/drive/MyDrive/weights/Kokoro-82M/voices/af_heart.pt",
-        "human2_voice": "/content/drive/MyDrive/weights/Kokoro-82M/voices/af_alloy.pt",
-        "human3_voice": "/content/drive/MyDrive/weights/Kokoro-82M/voices/af_bella.pt"
-    },
-    "cond_audio":{}
+  "prompt": "A professional TV studio scene with one male host and two female guests engaged in a formal discussion. The host, in a navy-blue suit, stands in the center holding a microphone. The guest on his left, in a red blouse, speaks confidently, while the guest on his right, in a white suit, listens attentively. The background features soft lighting and an audience in the studio.",
+  "cond_image": "examples/multi/5/multi1.jpg",
+  "audio_type": "para",
+  "tts_audio": {
+    "text": "(s1) Thank you for inviting me to the discussion. (s2) It’s our pleasure to have you here today. (s3) I’m glad to be part of this conversation as well. (s2) Today we’ll focus on professional growth and innovation. (s1) That’s an important topic in today’s world. (s3) Indeed, adapting to change is essential for success.",
+    "human1_voice": "/content/Multi-Talk/weights/Kokoro-82M/.cache/kokoro/af_sara.pt",
+    "human2_voice": "/content/Multi-Talk/weights/Kokoro-82M/.cache/kokoro/am_michael.pt",
+    "human3_voice": "/content/Multi-Talk/weights/Kokoro-82M/.cache/kokoro/af_nova.pt"
+  },
+  "cond_audio": {}
 }
