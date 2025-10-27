@@ -33,6 +33,9 @@ from einops import rearrange
 import soundfile as sf
 import re
 
+# Import ngrok
+from pyngrok import ngrok
+
 app = Flask(__name__)
 
 # Configuration - USING YOUR PATHS FROM CLI
@@ -691,10 +694,20 @@ if __name__ == "__main__":
     # Initialize models at startup
     if initialize_models(CONFIG):
         logging.info("Flask server starting with pre-loaded models...")
+        
+        # Start ngrok tunnel
+        public_url = ngrok.connect(5000)
+        logging.info(f"🚀 Public URL created: {public_url}")
+        logging.info("📋 Use this URL in Postman to test the API:")
+        logging.info(f"   Health Check: GET {public_url}/health")
+        logging.info(f"   TTS Generation: POST {public_url}/generate/with-tts")
+        logging.info(f"   Audio Generation: POST {public_url}/generate/with-audio")
+        
         try:
             app.run(host='0.0.0.0', port=5000, debug=False, threaded=False)
         finally:
             cleanup()
+            ngrok.kill()  # Close ngrok tunnel when server stops
     else:
         logging.error("Failed to initialize models. Server cannot start.")
         sys.exit(1)
