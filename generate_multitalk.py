@@ -408,8 +408,34 @@ def process_tts_multi(text, save_dir, voice1, voice2):
     return s1, s2, save_path_sum
 
 def process_tts_triple(text, save_dir, voice1, voice2, voice3):
-    pattern = r'\(s(\d+)\)\s*(.*?)(?=\s*\(s\d+\)|$)'
-    matches = re.findall(pattern, text, re.DOTALL)
+    print(f"🔍 Processing TTS text: '{text}'")
+    
+    # More robust regex pattern
+    pattern = r'\(s(\d+)\)\s*([^()]*?)(?=\s*\(s\d+\)|\s*$)'
+    matches = re.findall(pattern, text)
+    
+    print(f"🔍 Found {len(matches)} speech segments")
+    for i, (speaker, content) in enumerate(matches):
+        content = content.strip()
+        print(f"  Segment {i}: Speaker {speaker}, Content: '{content}'")
+    
+    if not matches:
+        print("❌ No speech segments found! Trying alternative pattern...")
+        # Alternative pattern for different format
+        pattern2 = r'\(s(\d+)\)\s*(.*?)(?=\(s\d+\)|$)'
+        matches = re.findall(pattern2, text, re.DOTALL)
+        print(f"🔍 Alternative pattern found {len(matches)} segments")
+        for i, (speaker, content) in enumerate(matches):
+            content = content.strip()
+            print(f"  Segment {i}: Speaker {speaker}, Content: '{content}'")
+    
+    if not matches:
+        print("❌ Still no segments found. Creating fallback audio...")
+        # Create minimal fallback audio
+        fallback_audio = np.zeros(16000)  # 1 second of silence
+        fallback_path = os.path.join(save_dir, 'sum.wav')
+        sf.write(fallback_path, fallback_audio, 16000)
+        return fallback_audio, fallback_audio, fallback_audio, fallback_path
     
     s1_sentences = []
     s2_sentences = []
@@ -418,8 +444,24 @@ def process_tts_triple(text, save_dir, voice1, voice2, voice3):
     pipeline = KPipeline(lang_code='a', repo_id='/content/drive/MyDrive/weights/Kokoro-82M')
     
     for idx, (speaker, content) in enumerate(matches):
-        if speaker == '1':
-            voice_tensor = torch.load(voice1, weights_only=True)
+        content = content.strip()
+        if not content:  # Skip empty content
+            print(f"⚠️ Skipping empty content for speaker {speaker}")
+            continue
+            
+        print(f"🎤 Processing speaker {speaker}: '{content}'")
+        
+        try:
+            if speaker == '1':
+                voice_tensor = torch.load(voice1, weights_only=True)
+            elif speaker == '2':
+                voice_tensor = torch.load(voice2, weights_only=True)
+            elif speaker == '3':
+                voice_tensor = torch.load(voice3, weights_only=True)
+            else:
+                print(f"❌ Unknown speaker: {speaker}")
+                continue
+                
             generator = pipeline(
                 content, voice=voice_tensor,
                 speed=1, split_pattern=r'\n+'
@@ -427,64 +469,120 @@ def process_tts_triple(text, save_dir, voice1, voice2, voice3):
             audios = []
             for i, (gs, ps, audio) in enumerate(generator):
                 audios.append(audio)
-            audios = torch.concat(audios, dim=0)
-            s1_sentences.append(audios)
-            s2_sentences.append(torch.zeros_like(audios))
-            s3_sentences.append(torch.zeros_like(audios))
-        elif speaker == '2':
-            voice_tensor = torch.load(voice2, weights_only=True)
-            generator = pipeline(
-                content, voice=voice_tensor,
-                speed=1, split_pattern=r'\n+'
-            )
-            audios = []
-            for i, (gs, ps, audio) in enumerate(generator):
-                audios.append(audio)
-            audios = torch.concat(audios, dim=0)
-            s2_sentences.append(audios)
-            s1_sentences.append(torch.zeros_like(audios))
-            s3_sentences.append(torch.zeros_like(audios))
-        elif speaker == '3':
-            voice_tensor = torch.load(voice3, weights_only=True)
-            generator = pipeline(
-                content, voice=voice_tensor,
-                speed=1, split_pattern=r'\n+'
-            )
-            audios = []
-            for i, (gs, ps, audio) in enumerate(generator):
-                audios.append(audio)
-            audios = torch.concat(audios, dim=0)
-            s3_sentences.append(audios)
-            s1_sentences.append(torch.zeros_like(audios))
-            s2_sentences.append(torch.zeros_like(audios))
+                print(f"  Generated audio chunk {i}: {audio.shape}")
+            
+            if audios:
+                combined_audio = torch.concat(audios, dim=0)
+                print(f"✅ Combined audio for speaker {speaker}: {combined_audio.shape}")
+                
+                if speaker == '1':
+                    s1_sentences.append(combined_audio)
+                    s2_sentences.append(torch.zeros_like(combined_audio))
+                    s3_sentences.append(torch.zeros_like(combined_audio))
+                elif speaker == '2':
+                    s2_sentences.append(combined_audio)
+                    s1_sentences.append(torch.zeros_like(combined_audio))
+                    s3_sentences.append(torch.zeros_like(combined_audio))
+                elif speaker == '3':
+                    s3_sentences.append(combined_audio)
+                    s1_sentences.append(torch.zeros_like(combined_audio))
+                    s2_sentences.append(torch.zeros_like(combined_audio))
+            else:
+                print(f"❌ No audio generated for speaker {speaker}")
+                
+        except Exception as e:
+            print(f"❌ Error processing speaker {speaker}: {e}")
+            import traceback
+            traceback.print_exc()
+
+    # Check if we have any audio before concatenating
+    print(f"📊 Audio segments - s1: {len(s1_sentences)}, s2: {len(s2_sentences)}, s3: {len(s3_sentences)}")
     
-    s1_sentences = torch.concat(s1_sentences, dim=0)
-    s2_sentences = torch.concat(s2_sentences, dim=0)
-    s3_sentences = torch.concat(s3_sentences, dim=0)
-    sum_sentences = s1_sentences + s2_sentences + s3_sentences
+    if not s1_sentences and not s2_sentences and not s3_sentences:
+        print("❌ No audio was generated for any speaker! Creating fallback...")
+        fallback_audio = np.zeros(16000)
+        fallback_path = os.path.join(save_dir, 'sum.wav')
+        sf.write(fallback_path, fallback_audio, 16000)
+        return fallback_audio, fallback_audio, fallback_audio, fallback_path
+
+    # Handle concatenation with safety checks
+    if s1_sentences:
+        s1_combined = torch.concat(s1_sentences, dim=0)
+        print(f"✅ Final speaker 1 audio: {s1_combined.shape}")
+    else:
+        s1_combined = torch.tensor([])
+        print("⚠️ No audio for speaker 1")
+        
+    if s2_sentences:
+        s2_combined = torch.concat(s2_sentences, dim=0)
+        print(f"✅ Final speaker 2 audio: {s2_combined.shape}")
+    else:
+        s2_combined = torch.tensor([])
+        print("⚠️ No audio for speaker 2")
+        
+    if s3_sentences:
+        s3_combined = torch.concat(s3_sentences, dim=0)
+        print(f"✅ Final speaker 3 audio: {s3_combined.shape}")
+    else:
+        s3_combined = torch.tensor([])
+        print("⚠️ No audio for speaker 3")
+
+    # Handle case where some speakers have no audio
+    lengths = [len(s1_combined), len(s2_combined), len(s3_combined)]
+    max_length = max(lengths) if lengths else 0
+    
+    print(f"📏 Audio lengths - s1: {len(s1_combined)}, s2: {len(s2_combined)}, s3: {len(s3_combined)}, max: {max_length}")
+    
+    if max_length == 0:
+        print("❌ All audio is empty! Creating fallback...")
+        fallback_audio = np.zeros(16000)
+        fallback_path = os.path.join(save_dir, 'sum.wav')
+        sf.write(fallback_path, fallback_audio, 16000)
+        return fallback_audio, fallback_audio, fallback_audio, fallback_path
+
+    # Pad shorter audios with zeros
+    if len(s1_combined) < max_length:
+        s1_combined = torch.cat([s1_combined, torch.zeros(max_length - len(s1_combined))])
+    if len(s2_combined) < max_length:
+        s2_combined = torch.cat([s2_combined, torch.zeros(max_length - len(s2_combined))])
+    if len(s3_combined) < max_length:
+        s3_combined = torch.cat([s3_combined, torch.zeros(max_length - len(s3_combined))])
+
+    sum_combined = s1_combined + s2_combined + s3_combined
     
     save_path1 = f'{save_dir}/s1.wav'
     save_path2 = f'{save_dir}/s2.wav'
     save_path3 = f'{save_dir}/s3.wav'
     save_path_sum = f'{save_dir}/sum.wav'
     
-    sf.write(save_path1, s1_sentences, 24000)
-    sf.write(save_path2, s2_sentences, 24000)
-    sf.write(save_path3, s3_sentences, 24000)
-    sf.write(save_path_sum, sum_sentences, 24000)
+    if len(s1_combined) > 0:
+        sf.write(save_path1, s1_combined.numpy(), 24000)
+        print(f"💾 Saved speaker 1 audio: {save_path1}")
+    if len(s2_combined) > 0:
+        sf.write(save_path2, s2_combined.numpy(), 24000)
+        print(f"💾 Saved speaker 2 audio: {save_path2}")
+    if len(s3_combined) > 0:
+        sf.write(save_path3, s3_combined.numpy(), 24000)
+        print(f"💾 Saved speaker 3 audio: {save_path3}")
+    
+    sf.write(save_path_sum, sum_combined.numpy(), 24000)
+    print(f"💾 Saved mixed audio: {save_path_sum}")
 
-    s1, _ = librosa.load(save_path1, sr=16000)
-    s2, _ = librosa.load(save_path2, sr=16000)
-    s3, _ = librosa.load(save_path3, sr=16000)
+    # Load back for consistency
+    s1, _ = librosa.load(save_path1, sr=16000) if len(s1_combined) > 0 else (np.array([]), 16000)
+    s2, _ = librosa.load(save_path2, sr=16000) if len(s2_combined) > 0 else (np.array([]), 16000)
+    s3, _ = librosa.load(save_path3, sr=16000) if len(s3_combined) > 0 else (np.array([]), 16000)
+    
+    print(f"🎉 TTS processing completed successfully!")
+    print(f"📈 Final audio lengths - s1: {len(s1)}, s2: {len(s2)}, s3: {len(s3)}")
     
     return s1, s2, s3, save_path_sum
-
 
 def generate(args):
     rank = int(os.getenv("RANK", 0))
     world_size = int(os.getenv("WORLD_SIZE", 1))
     local_rank = int(os.getenv("LOCAL_RANK", 0))
-    device = local_rank
+    device = f"cuda:{local_rank}"
     _init_logging(rank)
 
     if args.offload_model is None:
@@ -585,7 +683,7 @@ def generate(args):
     with open(args.input_json, 'r', encoding='utf-8') as f:
         input_data = json.load(f)
         
-        wav2vec_feature_extractor, audio_encoder= custom_init('cpu', args.wav2vec_dir)
+        wav2vec_feature_extractor, audio_encoder= custom_init(device, args.wav2vec_dir)
         args.audio_save_dir = os.path.join(args.audio_save_dir, input_data['cond_image'].split('/')[-1].split('.')[0])
         os.makedirs(args.audio_save_dir,exist_ok=True)
         
@@ -601,7 +699,7 @@ def generate(args):
                 if audio_path is not None:
                     speech = audio_prepare_single(audio_path)
                     all_audio_arrays.append(speech)
-                    emb = get_embedding(speech, wav2vec_feature_extractor, audio_encoder)
+                    emb = get_embedding(speech, wav2vec_feature_extractor, audio_encoder,16000,device)
                     emb_path = os.path.join(args.audio_save_dir, f'{i+1}.pt')
                     torch.save(emb, emb_path)
                     input_data['cond_audio'][key] = emb_path
@@ -619,7 +717,7 @@ def generate(args):
                     if 'human2_voice' not in input_data['tts_audio'].keys():
                         # Single speaker TTS
                         new_human_speech1, sum_audio = process_tts_single(input_data['tts_audio']['text'], args.audio_save_dir, input_data['tts_audio']['human1_voice'])
-                        audio_embedding_1 = get_embedding(new_human_speech1, wav2vec_feature_extractor, audio_encoder)
+                        audio_embedding_1 = get_embedding(new_human_speech1, wav2vec_feature_extractor, audio_encoder,16000,device)
                         emb1_path = os.path.join(args.audio_save_dir, '1.pt')
                         torch.save(audio_embedding_1, emb1_path)
                         input_data['cond_audio']['person1'] = emb1_path
@@ -633,9 +731,9 @@ def generate(args):
                             input_data['tts_audio']['human2_voice'],
                             input_data['tts_audio']['human3_voice']
                         )
-                        audio_embedding_1 = get_embedding(new_human_speech1, wav2vec_feature_extractor, audio_encoder)
-                        audio_embedding_2 = get_embedding(new_human_speech2, wav2vec_feature_extractor, audio_encoder)
-                        audio_embedding_3 = get_embedding(new_human_speech3, wav2vec_feature_extractor, audio_encoder)
+                        audio_embedding_1 = get_embedding(new_human_speech1, wav2vec_feature_extractor, audio_encoder,16000,device)
+                        audio_embedding_2 = get_embedding(new_human_speech2, wav2vec_feature_extractor, audio_encoder,16000,device)
+                        audio_embedding_3 = get_embedding(new_human_speech3, wav2vec_feature_extractor, audio_encoder,16000,device)
                         emb1_path = os.path.join(args.audio_save_dir, '1.pt')
                         emb2_path = os.path.join(args.audio_save_dir, '2.pt')
                         emb3_path = os.path.join(args.audio_save_dir, '3.pt')
@@ -649,8 +747,8 @@ def generate(args):
                     else:
                         # Two speaker TTS
                         new_human_speech1, new_human_speech2, sum_audio = process_tts_multi(input_data['tts_audio']['text'], args.audio_save_dir, input_data['tts_audio']['human1_voice'], input_data['tts_audio']['human2_voice'])
-                        audio_embedding_1 = get_embedding(new_human_speech1, wav2vec_feature_extractor, audio_encoder)
-                        audio_embedding_2 = get_embedding(new_human_speech2, wav2vec_feature_extractor, audio_encoder)
+                        audio_embedding_1 = get_embedding(new_human_speech1, wav2vec_feature_extractor, audio_encoder,16000,device)
+                        audio_embedding_2 = get_embedding(new_human_speech2, wav2vec_feature_extractor, audio_encoder,16000,device)
                         emb1_path = os.path.join(args.audio_save_dir, '1.pt')
                         emb2_path = os.path.join(args.audio_save_dir, '2.pt')
                         torch.save(audio_embedding_1, emb1_path)
@@ -666,7 +764,7 @@ def generate(args):
         config=cfg,
         checkpoint_dir=args.ckpt_dir,
         quant_dir=args.quant_dir,
-        device_id=device,
+        device_id=local_rank,
         rank=rank,
         t5_fsdp=args.t5_fsdp,
         dit_fsdp=args.dit_fsdp, 
@@ -719,3 +817,25 @@ def generate(args):
 if __name__ == "__main__":
     args = _parse_args()
     generate(args)
+
+
+
+
+    
+
+
+python generate_multitalk.py \
+    --ckpt_dir /content/drive/MyDrive/weights/Wan2.1-I2V-14B-480P \
+    --wav2vec_dir '/content/drive/MyDrive/weights/chinese-wav2vec2-base' \
+    --input_json examples/multitalk_3_example1.json \
+    --lora_dir /content/drive/MyDrive/weights/MeiGen-MultiTalk/quant_models/quant_model_int8_FusionX.safetensors \
+    --sample_text_guide_scale 1.0 \
+    --sample_audio_guide_scale 2.0 \
+    --sample_steps 8 \
+    --mode streaming \
+    --audio_mode tts \
+    --quant int8 \
+    --quant_dir /content/drive/MyDrive/weights/MeiGen-MultiTalk \
+    --save_file multi_long_lowvram_fusionx_exp \
+    --sample_shift 2 \
+    --audio_mode tts

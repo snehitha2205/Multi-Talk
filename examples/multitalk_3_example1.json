@@ -3,10 +3,11 @@
   "cond_image": "examples/multi/5/multi1.jpg",
   "audio_type": "para",
   "tts_audio": {
-    "text": "(s1) Thank you for inviting me to the discussion. (s2) It’s our pleasure to have you here today. (s3) I’m glad to be part of this conversation as well. (s2) Today we’ll focus on professional growth and innovation. (s1) That’s an important topic in today’s world. (s3) Indeed, adapting to change is essential for success.",
+   "text": "(s1) Grateful for this invite. (s2) We are glad you are here. (s3) Happy to be part of this. (s2) Today’s focus is growth. (s1) This is so important now.",   
     "human1_voice": "/content/drive/MyDrive/weights/Kokoro-82M/voices/af_bella.pt",
     "human2_voice": "/content/drive/MyDrive/weights/Kokoro-82M/voices/am_michael.pt",
     "human3_voice": "/content/drive/MyDrive/weights/Kokoro-82M/voices/af_alloy.pt"
   },
+
   "cond_audio": {}
 }
